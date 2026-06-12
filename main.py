@@ -81,6 +81,86 @@ class TelloController:
             self.simulated = True
             return {"status": "success", "response": "ok (simulated fallback)", "simulated": True}
 
+
+class LevitonController:
+    def __init__(self, email=None, password=None):
+        self.email = email or os.environ.get("LEVITON_EMAIL")
+        self.password = password or os.environ.get("LEVITON_PASSWORD")
+        self.session = None
+        # Start in simulated mode if no email or password is provided or if they are placeholders
+        self.simulated = not (self.email and self.password) or "placeholder" in self.email or "placeholder" in self.password
+        if self.simulated:
+            print("[Leviton] Running in simulated mode (no valid credentials in .env).")
+
+    def login(self):
+        if self.simulated:
+            return True
+        if self.session is not None:
+            return True
+        try:
+            from decora_wifi import DecoraWiFiSession
+            self.session = DecoraWiFiSession()
+            self.session.login(self.email, self.password)
+            print("[Leviton] Successfully authenticated with Leviton Cloud Services.")
+            return True
+        except Exception as e:
+            print(f"[Leviton] Failed to authenticate: {e}. Switching to simulation.")
+            self.simulated = True
+            return True
+
+    def set_light_state(self, switch_name: str, state: bool, brightness: int = None) -> dict:
+        if self.simulated:
+            state_str = "ON" if state else "OFF"
+            bright_str = f" at {brightness}%" if brightness is not None else ""
+            print(f"\n[Simulated Leviton] Set switch '{switch_name}' to {state_str}{bright_str}")
+            return {"status": "success", "switch_name": switch_name, "state": state_str, "brightness": brightness, "simulated": True}
+
+        self.login()
+        if self.simulated:
+            return self.set_light_state(switch_name, state, brightness)
+
+        try:
+            from decora_wifi.models.residential_account import ResidentialAccount
+            
+            perms = self.session.user.get_residential_permissions()
+            found_switch = None
+            
+            for permission in perms:
+                acct = ResidentialAccount(self.session, permission.residentialAccountId)
+                residences = acct.get_residences()
+                for residence in residences:
+                    switches = residence.get_iot_switches()
+                    for switch in switches:
+                        if switch_name.lower() in switch.name.lower():
+                            found_switch = switch
+                            break
+                    if found_switch:
+                        break
+                if found_switch:
+                    break
+
+            if not found_switch:
+                print(f"[Leviton] Switch '{switch_name}' not found.")
+                return {"status": "error", "message": f"Switch '{switch_name}' not found."}
+
+            attribs = {'power': 'ON' if state else 'OFF'}
+            if brightness is not None:
+                attribs['brightness'] = brightness
+
+            found_switch.update_attributes(attribs)
+            found_switch.refresh()
+            print(f"[Leviton] Updated switch '{found_switch.name}' to power={found_switch.power}, brightness={found_switch.brightness}")
+            return {
+                "status": "success",
+                "switch_name": found_switch.name,
+                "state": found_switch.power,
+                "brightness": found_switch.brightness
+            }
+        except Exception as e:
+            print(f"[Leviton] Error updating switch '{switch_name}': {e}")
+            return {"status": "error", "message": str(e)}
+
+
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
@@ -153,19 +233,50 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
             }
         )
     )
+
+    # Add Leviton switch control tool
+    function_declarations.append(
+        types.FunctionDeclaration(
+            name="set_leviton_light_state",
+            description=(
+                "Controls Leviton Decora Smart Wi-Fi switches and dimmers in the user's home. "
+                "Allows turning lights on/off and optionally setting brightness levels (for dimmers)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "switch_name": {
+                        "type": "string",
+                        "description": "The name of the light switch to control (e.g. 'Kitchen', 'Living Room')."
+                    },
+                    "state": {
+                        "type": "boolean",
+                        "description": "True to turn the light on, False to turn it off."
+                    },
+                    "brightness": {
+                        "type": "integer",
+                        "description": "Optional brightness level as a percentage (0 to 100). Only applicable to dimmable switches."
+                    }
+                },
+                "required": ["switch_name", "state"]
+            }
+        )
+    )
     
     if function_declarations:
         tools.append(types.Tool(function_declarations=function_declarations))
 
     system_instruction = (
         "You are a helpful real-time voice assistant running on the user's local computer. "
-        "You have direct access to local hardware: an onboard LED of an ESP32 microcontroller and a Tello drone.\n\n"
+        "You have direct access to local hardware and smart devices: an onboard LED of an ESP32 microcontroller, "
+        "a Tello drone, and Leviton smart lights.\n\n"
         "1. ESP32 LED: You MUST use the `set_led_state` tool to control this LED whenever the user asks you to "
         "turn the LED on or off, make it blink, or change its state.\n"
         "2. Tello Drone: You MUST use the `send_tello_command` tool to control the Tello drone when the user asks you "
-        "to perform actions like takeoff, landing, moving, flipping, or rotating. "
-        "Select the appropriate command from the list of supported SDK commands and pass it to the tool.\n\n"
-        "If a physical device (ESP32 or Tello drone) is not connected, the application will automatically run "
+        "to perform actions like takeoff, landing, moving, flipping, or rotating.\n"
+        "3. Leviton Lights: You MUST use the `set_leviton_light_state` tool when the user asks you to turn smart home "
+        "lights on, off, or change their brightness level.\n\n"
+        "If a physical device is not connected or configured, the application will automatically run "
         "the command in simulated/fallback mode, so always call the tools anyway. "
         "Never tell the user that you cannot control the hardware, as you are fully equipped with tools to do so."
     )
@@ -201,6 +312,7 @@ class AudioLoop:
         self.esp32_port = esp32_port
         self.serial_conn = None
         self.tello = TelloController()
+        self.leviton = LevitonController()
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -233,6 +345,9 @@ class AudioLoop:
 
     async def send_tello_command(self, command: str) -> dict:
         return await asyncio.to_thread(self.tello.send_cmd, command)
+
+    async def set_leviton_light_state(self, switch_name: str, state: bool, brightness: int = None) -> dict:
+        return await asyncio.to_thread(self.leviton.set_light_state, switch_name, state, brightness)
 
 
     async def send_text(self):
@@ -379,6 +494,18 @@ class AudioLoop:
                             elif fc.name == "send_tello_command":
                                 command = fc.args.get("command")
                                 result = await self.send_tello_command(command)
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        name=fc.name,
+                                        response=result,
+                                        id=fc.id
+                                    )
+                                )
+                            elif fc.name == "set_leviton_light_state":
+                                switch_name = fc.args.get("switch_name")
+                                state = fc.args.get("state")
+                                brightness = fc.args.get("brightness")
+                                result = await self.set_leviton_light_state(switch_name, state, brightness)
                                 function_responses.append(
                                     types.FunctionResponse(
                                         name=fc.name,

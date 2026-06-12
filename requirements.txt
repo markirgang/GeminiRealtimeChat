@@ -5,3 +5,4 @@ pillow
 python-dotenv
 mss
 pyserial
+decora-wifi
