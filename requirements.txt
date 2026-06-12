@@ -6,3 +6,4 @@ python-dotenv
 mss
 pyserial
 decora-wifi
+sonoff-python

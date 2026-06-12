@@ -161,6 +161,70 @@ class LevitonController:
             return {"status": "error", "message": str(e)}
 
 
+class EwelinkController:
+    def __init__(self, username=None, password=None, region="us"):
+        self.username = username or os.environ.get("EWELINK_USERNAME")
+        self.password = password or os.environ.get("EWELINK_PASSWORD")
+        self.region = region or os.environ.get("EWELINK_REGION", "us")
+        self.client = None
+        # Start in simulated mode if no credentials or placeholders are present
+        self.simulated = not (self.username and self.password) or "placeholder" in self.username or "placeholder" in self.password
+        if self.simulated:
+            print("[eWeLink] Running in simulated mode (no valid credentials in .env).")
+
+    def login(self):
+        if self.simulated:
+            return True
+        if self.client is not None:
+            return True
+        try:
+            import sonoff
+            self.client = sonoff.Sonoff(self.username, self.password, self.region)
+            print("[eWeLink] Successfully authenticated with eWeLink Cloud Services.")
+            return True
+        except Exception as e:
+            print(f"[eWeLink] Failed to authenticate: {e}. Switching to simulation.")
+            self.simulated = True
+            return True
+
+    def set_device_state(self, device_name: str, state: bool) -> dict:
+        if self.simulated:
+            state_str = "ON" if state else "OFF"
+            print(f"\n[Simulated eWeLink] Set device '{device_name}' to {state_str}")
+            return {"status": "success", "device_name": device_name, "state": state_str, "simulated": True}
+
+        self.login()
+        if self.simulated:
+            return self.set_device_state(device_name, state)
+
+        try:
+            devices = self.client.get_devices()
+            found_device = None
+            if devices:
+                for device in devices:
+                    name = device.get('name', '')
+                    if device_name.lower() in name.lower():
+                        found_device = device
+                        break
+
+            if not found_device:
+                print(f"[eWeLink] Device '{device_name}' not found.")
+                return {"status": "error", "message": f"Device '{device_name}' not found."}
+
+            device_id = found_device['deviceid']
+            state_str = 'on' if state else 'off'
+            self.client.switch(state_str, device_id, None)
+            print(f"[eWeLink] Updated device '{found_device.get('name')}' state to {state_str}")
+            return {
+                "status": "success",
+                "device_name": found_device.get('name'),
+                "state": "ON" if state else "OFF"
+            }
+        except Exception as e:
+            print(f"[eWeLink] Error updating device '{device_name}': {e}")
+            return {"status": "error", "message": str(e)}
+
+
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
@@ -262,6 +326,31 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
             }
         )
     )
+
+    # Add eWeLink switch control tool
+    function_declarations.append(
+        types.FunctionDeclaration(
+            name="set_ewelink_device_state",
+            description=(
+                "Controls eWeLink (Sonoff) smart plugs, switches, and other devices in the user's home. "
+                "Allows turning devices on or off."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "device_name": {
+                        "type": "string",
+                        "description": "The name of the device to control (e.g. 'Fan', 'Desk Light')."
+                    },
+                    "state": {
+                        "type": "boolean",
+                        "description": "True to turn the device on, False to turn it off."
+                    }
+                },
+                "required": ["device_name", "state"]
+            }
+        )
+    )
     
     if function_declarations:
         tools.append(types.Tool(function_declarations=function_declarations))
@@ -269,13 +358,15 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
     system_instruction = (
         "You are a helpful real-time voice assistant running on the user's local computer. "
         "You have direct access to local hardware and smart devices: an onboard LED of an ESP32 microcontroller, "
-        "a Tello drone, and Leviton smart lights.\n\n"
+        "a Tello drone, Leviton smart lights, and eWeLink (Sonoff) devices.\n\n"
         "1. ESP32 LED: You MUST use the `set_led_state` tool to control this LED whenever the user asks you to "
         "turn the LED on or off, make it blink, or change its state.\n"
         "2. Tello Drone: You MUST use the `send_tello_command` tool to control the Tello drone when the user asks you "
         "to perform actions like takeoff, landing, moving, flipping, or rotating.\n"
         "3. Leviton Lights: You MUST use the `set_leviton_light_state` tool when the user asks you to turn smart home "
-        "lights on, off, or change their brightness level.\n\n"
+        "lights on, off, or change their brightness level.\n"
+        "4. eWeLink Devices: You MUST use the `set_ewelink_device_state` tool when the user asks you to turn eWeLink "
+        "or Sonoff devices (plugs, switches, fans, etc.) on or off.\n\n"
         "If a physical device is not connected or configured, the application will automatically run "
         "the command in simulated/fallback mode, so always call the tools anyway. "
         "Never tell the user that you cannot control the hardware, as you are fully equipped with tools to do so."
@@ -313,6 +404,7 @@ class AudioLoop:
         self.serial_conn = None
         self.tello = TelloController()
         self.leviton = LevitonController()
+        self.ewelink = EwelinkController()
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -348,6 +440,9 @@ class AudioLoop:
 
     async def set_leviton_light_state(self, switch_name: str, state: bool, brightness: int = None) -> dict:
         return await asyncio.to_thread(self.leviton.set_light_state, switch_name, state, brightness)
+
+    async def set_ewelink_device_state(self, device_name: str, state: bool) -> dict:
+        return await asyncio.to_thread(self.ewelink.set_device_state, device_name, state)
 
 
     async def send_text(self):
@@ -506,6 +601,17 @@ class AudioLoop:
                                 state = fc.args.get("state")
                                 brightness = fc.args.get("brightness")
                                 result = await self.set_leviton_light_state(switch_name, state, brightness)
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        name=fc.name,
+                                        response=result,
+                                        id=fc.id
+                                    )
+                                )
+                            elif fc.name == "set_ewelink_device_state":
+                                device_name = fc.args.get("device_name")
+                                state = fc.args.get("state")
+                                result = await self.set_ewelink_device_state(device_name, state)
                                 function_responses.append(
                                     types.FunctionResponse(
                                         name=fc.name,
