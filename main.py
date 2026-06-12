@@ -16,6 +16,7 @@ import asyncio
 import base64
 import io
 import traceback
+import socket
 
 import cv2
 import pyaudio
@@ -35,6 +36,51 @@ try:
 except ImportError:
     serial = None
 
+
+class TelloController:
+    def __init__(self, ip="192.168.10.1", port=8889):
+        self.drone_address = (ip, port)
+        self.sock = None
+        self.sdk_enabled = False
+        self.simulated = False  # Start by trying real connection, fallback on failure
+
+    def init_socket(self):
+        if self.sock is None and not self.simulated:
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.sock.bind(('', 0))
+                self.sock.settimeout(3.0)  # 3-second timeout for quick detection
+            except Exception as e:
+                print(f"[Tello] Failed to initialize socket: {e}. Switching to simulation.")
+                self.simulated = True
+
+    def send_cmd(self, command: str) -> dict:
+        if self.simulated:
+            print(f"\n[Simulated Tello] Executing command: {command}")
+            return {"status": "success", "response": "ok (simulated)"}
+            
+        self.init_socket()
+        try:
+            # Automatically enable SDK mode if not already done
+            if not self.sdk_enabled and command != "command":
+                print("[Tello] Enabling SDK mode...")
+                self.sock.sendto(b"command", self.drone_address)
+                response, _ = self.sock.recvfrom(1024)
+                print(f"[Tello] SDK response: {response.decode('utf-8').strip()}")
+                self.sdk_enabled = True
+
+            print(f"[Tello] Sending command: {command}")
+            self.sock.sendto(command.encode('utf-8'), self.drone_address)
+            response, _ = self.sock.recvfrom(1024)
+            res_str = response.decode('utf-8').strip()
+            print(f"[Tello] Response: {res_str}")
+            return {"status": "success", "response": res_str}
+        except (socket.timeout, socket.error) as e:
+            # Fall back to simulation if the physical drone isn't reachable
+            print(f"[Tello] Communication failed ({e}). Falling back to simulation for: {command}")
+            self.simulated = True
+            return {"status": "success", "response": "ok (simulated fallback)", "simulated": True}
+
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
@@ -53,36 +99,75 @@ client = genai.Client(
 
 def get_config(voice_name="Zephyr", enable_esp32=True):
     tools = []
+    
+    # Common tools list
+    function_declarations = []
+    
     if enable_esp32:
-        tools.append(
-            types.Tool(
-                function_declarations=[
-                    types.FunctionDeclaration(
-                        name="set_led_state",
-                        description="Controls the onboard LED of the ESP32 dev module. State should be True to turn the LED on, or False to turn it off.",
-                        parameters={
-                            "type": "object",
-                            "properties": {
-                                "state": {
-                                    "type": "boolean",
-                                    "description": "True to turn on the LED (red), False to turn it off."
-                                }
-                            },
-                            "required": ["state"]
+        function_declarations.append(
+            types.FunctionDeclaration(
+                name="set_led_state",
+                description="Controls the onboard LED of the ESP32 dev module. State should be True to turn the LED on, or False to turn it off.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "state": {
+                            "type": "boolean",
+                            "description": "True to turn on the LED (red), False to turn it off."
                         }
-                    )
-                ]
+                    },
+                    "required": ["state"]
+                }
             )
         )
+        
+    # Add Tello drone control tool
+    function_declarations.append(
+        types.FunctionDeclaration(
+            name="send_tello_command",
+            description=(
+                "Sends a control command to the Tello drone over UDP. "
+                "Supported commands include:\n"
+                "- 'takeoff': Take off from the ground\n"
+                "- 'land': Land on the ground\n"
+                "- 'up x': Fly up (x = 20-200 cm)\n"
+                "- 'down x': Fly down (x = 20-200 cm)\n"
+                "- 'left x': Fly left (x = 20-200 cm)\n"
+                "- 'right x': Fly right (x = 20-200 cm)\n"
+                "- 'forward x': Fly forward (x = 20-200 cm)\n"
+                "- 'back x': Fly back (x = 20-200 cm)\n"
+                "- 'cw x': Rotate x degrees clockwise (x = 1-360)\n"
+                "- 'ccw x': Rotate x degrees counter-clockwise (x = 1-360)\n"
+                "- 'flip x': Flip in direction x ('l', 'r', 'f', 'b')\n"
+                "- 'emergency': Stop motors immediately"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The SDK command to send to the drone."
+                    }
+                },
+                "required": ["command"]
+            }
+        )
+    )
+    
+    if function_declarations:
+        tools.append(types.Tool(function_declarations=function_declarations))
 
     system_instruction = (
         "You are a helpful real-time voice assistant running on the user's local computer. "
-        "You have direct access to local hardware: an onboard LED of an ESP32 microcontroller. "
-        "You MUST use the `set_led_state` tool to control this LED whenever the user asks you to "
-        "turn the LED on or off, make it blink, or change its state. "
-        "If the physical device is not connected, the application will handle it in a simulated environment, "
-        "so always call the tool anyway. Never tell the user that you cannot control hardware, "
-        "as you are fully equipped with the tool to do so."
+        "You have direct access to local hardware: an onboard LED of an ESP32 microcontroller and a Tello drone.\n\n"
+        "1. ESP32 LED: You MUST use the `set_led_state` tool to control this LED whenever the user asks you to "
+        "turn the LED on or off, make it blink, or change its state.\n"
+        "2. Tello Drone: You MUST use the `send_tello_command` tool to control the Tello drone when the user asks you "
+        "to perform actions like takeoff, landing, moving, flipping, or rotating. "
+        "Select the appropriate command from the list of supported SDK commands and pass it to the tool.\n\n"
+        "If a physical device (ESP32 or Tello drone) is not connected, the application will automatically run "
+        "the command in simulated/fallback mode, so always call the tools anyway. "
+        "Never tell the user that you cannot control the hardware, as you are fully equipped with tools to do so."
     )
 
     return types.LiveConnectConfig(
@@ -115,6 +200,7 @@ class AudioLoop:
         self.voice_name = voice_name
         self.esp32_port = esp32_port
         self.serial_conn = None
+        self.tello = TelloController()
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -144,6 +230,9 @@ class AudioLoop:
             status = "ON" if state else "OFF"
             print(f"\n[Simulated ESP32] Sent command to turn LED {status} (No physical ESP32 connected)")
             return {"status": "success", "led_state": status, "simulated": True}
+
+    async def send_tello_command(self, command: str) -> dict:
+        return await asyncio.to_thread(self.tello.send_cmd, command)
 
 
     async def send_text(self):
@@ -280,6 +369,16 @@ class AudioLoop:
                             if fc.name == "set_led_state":
                                 state = fc.args.get("state")
                                 result = self.set_led_state(state)
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        name=fc.name,
+                                        response=result,
+                                        id=fc.id
+                                    )
+                                )
+                            elif fc.name == "send_tello_command":
+                                command = fc.args.get("command")
+                                result = await self.send_tello_command(command)
                                 function_responses.append(
                                     types.FunctionResponse(
                                         name=fc.name,
