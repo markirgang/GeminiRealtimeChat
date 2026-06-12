@@ -1,0 +1,7 @@
+google-genai
+pyaudio
+opencv-python
+pillow
+python-dotenv
+mss
+pyserial
