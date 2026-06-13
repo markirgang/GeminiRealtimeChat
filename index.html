@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini Live Multimodal Chat</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Font Awesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- CSS Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-glow"></div>
+        <i class="fa-solid fa-wand-magic-sparkles brand-icon"></i>
+        <h1>Gemini <span class="accent-text">Live</span></h1>
+      </div>
+      <div class="status-badge disconnected" id="connection-status">
+        <span class="status-dot"></span>
+        <span id="status-text">Disconnected</span>
+      </div>
+    </header>
+
+    <main class="app-grid">
+      <!-- Left Column: Config & Controls -->
+      <section class="left-column">
+        <!-- Configuration Card -->
+        <div class="card glass-card" id="config-card">
+          <div class="card-header">
+            <i class="fa-solid fa-sliders"></i>
+            <h2>Configuration</h2>
+          </div>
+          
+          <div class="card-body">
+            <div class="input-group">
+              <label for="api-key">Gemini API Key</label>
+              <div class="password-input-wrapper">
+                <input type="password" id="api-key" placeholder="Enter your Gemini API Key..." autocomplete="off">
+                <button type="button" id="toggle-api-key" class="icon-btn" title="Show/Hide API Key">
+                  <i class="fa-solid fa-eye"></i>
+                </button>
+              </div>
+              <p class="helper-text">Your API key is saved locally in your browser and is never sent to any server other than the Google Gemini API endpoint.</p>
+            </div>
+
+            <div class="grid-2-col">
+              <div class="input-group">
+                <label for="model-select">Model</label>
+                <select id="model-select">
+                  <option value="models/gemini-2.0-flash-exp" selected>Gemini 2.0 Flash Exp</option>
+                  <option value="models/gemini-2.5-flash">Gemini 2.5 Flash</option>
+                </select>
+              </div>
+
+              <div class="input-group">
+                <label for="voice-select">Voice</label>
+                <select id="voice-select">
+                  <option value="Puck" selected>Puck (Male)</option>
+                  <option value="Charon">Charon (Deep Male)</option>
+                  <option value="Aoede">Aoede (Female)</option>
+                  <option value="Fenrir">Fenrir (Deep Male Alt)</option>
+                  <option value="Kore">Kore (Female Alt)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="input-group">
+              <label for="system-instruction">System Instruction</label>
+              <textarea id="system-instruction" placeholder="e.g. You are a helpful assistant. Keep your responses concise and friendly."></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- Media Panel (Webcam / Screen Share Preview) -->
+        <div class="card glass-card" id="media-card">
+          <div class="card-header">
+            <i class="fa-solid fa-video"></i>
+            <h2>Visual Input Feed</h2>
+            <div id="media-source-label" class="badge hidden">Camera</div>
+          </div>
+          <div class="card-body media-body">
+            <div class="video-container">
+              <video id="local-video" autoplay playsinline muted class="hidden"></video>
+              <div class="video-placeholder" id="video-placeholder">
+                <i class="fa-solid fa-camera-retro placeholder-icon"></i>
+                <p>Visual sharing inactive</p>
+                <span class="placeholder-sub">Enable Camera or Screen Share below to stream visual contexts to Gemini.</span>
+              </div>
+              <canvas id="hidden-canvas" style="display: none;"></canvas>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column: Visualizers & Live Transcription Chat -->
+      <section class="right-column">
+        <!-- Interactive Visualizers Card -->
+        <div class="card glass-card" id="visualizer-card">
+          <div class="card-header">
+            <i class="fa-solid fa-chart-simple"></i>
+            <h2>Real-time Audio Streams</h2>
+          </div>
+          <div class="card-body visualizer-body">
+            <div class="visualizers-container">
+              <!-- User Voice Wave -->
+              <div class="visualizer-block">
+                <div class="visualizer-label">
+                  <i class="fa-solid fa-microphone"></i>
+                  <span>Your Microphone</span>
+                </div>
+                <div class="canvas-wrapper">
+                  <canvas id="user-canvas"></canvas>
+                </div>
+              </div>
+
+              <!-- Gemini Voice Wave -->
+              <div class="visualizer-block">
+                <div class="visualizer-label">
+                  <i class="fa-solid fa-wand-magic-sparkles"></i>
+                  <span>Gemini Voice</span>
+                </div>
+                <div class="canvas-wrapper">
+                  <canvas id="gemini-canvas"></canvas>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat / Transcription Card -->
+        <div class="card glass-card flex-grow-card" id="chat-card">
+          <div class="card-header">
+            <i class="fa-solid fa-comment-dots"></i>
+            <h2>Live Transcription Log</h2>
+            <button id="clear-log" class="text-btn btn-small" title="Clear Chat Log">
+              <i class="fa-solid fa-trash-can"></i> Clear
+            </button>
+          </div>
+          <div class="card-body chat-body" id="chat-log">
+            <!-- System Status Messages -->
+            <div class="system-message">
+              <span class="timestamp">System</span>
+              <p>Welcome! Enter your Gemini API Key, set your preferences, and click "Connect Session" to start the live conversation.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Floating Action Dock -->
+    <footer class="app-dock">
+      <div class="dock-container">
+        <!-- Start/Stop Live Session -->
+        <button id="connect-btn" class="dock-btn action-connect" title="Connect Live Session">
+          <i class="fa-solid fa-phone"></i>
+          <span>Connect Session</span>
+        </button>
+
+        <div class="divider"></div>
+
+        <!-- Mute/Unmute mic -->
+        <button id="mic-toggle" class="dock-btn icon-only" title="Mute Microphone" disabled>
+          <i class="fa-solid fa-microphone"></i>
+        </button>
+
+        <!-- Toggle Webcam -->
+        <button id="camera-toggle" class="dock-btn icon-only" title="Toggle Webcam" disabled>
+          <i class="fa-solid fa-video"></i>
+        </button>
+
+        <!-- Toggle Screen Share -->
+        <button id="screen-toggle" class="dock-btn icon-only" title="Toggle Screen Share" disabled>
+          <i class="fa-solid fa-desktop"></i>
+        </button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Main JavaScript App -->
+  <script src="app.js"></script>
+</body>
+</html>

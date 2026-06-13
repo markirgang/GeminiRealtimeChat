@@ -11,7 +11,7 @@
 */
 
 #ifndef LED_BUILTIN
-#define LED_PIN 2  // Default onboard LED pin for most ESP32 Dev Modules
+#define LED_PIN 13  // Default onboard LED pin for most ESP32 Dev Modules
 #else
 #define LED_PIN LED_BUILTIN
 #endif
@@ -24,6 +24,17 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   
   // Turn the LED off initially
+
+  digitalWrite(LED_PIN, LOW);
+  delay(1000);
+    digitalWrite(4, HIGH);
+    digitalWrite(7, HIGH);
+    digitalWrite(9, HIGH);
+    digitalWrite(6, HIGH);
+    digitalWrite(2, HIGH);
+    digitalWrite(1, HIGH);
+    digitalWrite(13, HIGH);
+    delay(3000);
   digitalWrite(LED_PIN, LOW);
   
   Serial.println("ESP32 Ready. Send '1' to turn on, '0' to turn off.");
