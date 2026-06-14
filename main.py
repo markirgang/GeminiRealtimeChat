@@ -356,17 +356,21 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
         tools.append(types.Tool(function_declarations=function_declarations))
 
     system_instruction = (
-        "You are a helpful real-time voice assistant running on the user's local computer. "
+        "You are a helpful real-time multimodal voice assistant running on the user's local computer. "
         "You have direct access to local hardware and smart devices: an onboard LED of an ESP32 microcontroller, "
         "a Tello drone, Leviton smart lights, and eWeLink (Sonoff) devices.\n\n"
-        "1. ESP32 LED: You MUST use the `set_led_state` tool to control this LED whenever the user asks you to "
-        "turn the LED on or off, make it blink, or change its state.\n"
-        "2. Tello Drone: You MUST use the `send_tello_command` tool to control the Tello drone when the user asks you "
-        "to perform actions like takeoff, landing, moving, flipping, or rotating.\n"
-        "3. Leviton Lights: You MUST use the `set_leviton_light_state` tool when the user asks you to turn smart home "
-        "lights on, off, or change their brightness level.\n"
-        "4. eWeLink Devices: You MUST use the `set_ewelink_device_state` tool when the user asks you to turn eWeLink "
-        "or Sonoff devices (plugs, switches, fans, etc.) on or off.\n\n"
+        "1. VISUAL MODALITY AWARENESS:\n"
+        "   - You are receiving a continuous, real-time video stream (from the user's webcam or screen share).\n"
+        "   - Pay close attention to what you see. You MUST proactively notice, react to, and comment on objects, gestures, text, or visual changes shown in the video feed. Do NOT wait for the user to prompt you or say they are showing you something; describe what you see naturally as part of the conversation.\n"
+        "   - For example, if you see the user holding a coffee cup, showing a phone, or displaying any object, refer to it and ask about it or comment on it immediately.\n\n"
+        "2. TIME PERCEPTION CALIBRATION:\n"
+        "   - The video stream is sent to you at exactly 1 frame per second (1 FPS). Each frame you receive represents exactly 1 second of real time.\n"
+        "   - When estimating time or counting seconds (e.g., if the user asks you to wait 5 seconds, count seconds, or track time), use the number of incoming frames as your clock (e.g. 5 frames = 5 seconds). Do not rush or estimate time based on text-generation speeds; wait for the appropriate amount of time to pass.\n\n"
+        "3. HARDWARE CONTROL:\n"
+        "   - ESP32 LED: You MUST use the `set_led_state` tool to control this LED whenever the user asks you to turn the LED on or off, make it blink, or change its state.\n"
+        "   - Tello Drone: You MUST use the `send_tello_command` tool to control the Tello drone when the user asks you to perform actions like takeoff, landing, moving, flipping, or rotating.\n"
+        "   - Leviton Lights: You MUST use the `set_leviton_light_state` tool when the user asks you to turn smart home lights on, off, or change their brightness level.\n"
+        "   - eWeLink Devices: You MUST use the `set_ewelink_device_state` tool when the user asks you to turn eWeLink or Sonoff devices (plugs, switches, fans, etc.) on or off.\n\n"
         "If a physical device is not connected or configured, the application will automatically run "
         "the command in simulated/fallback mode, so always call the tools anyway. "
         "Never tell the user that you cannot control the hardware, as you are fully equipped with tools to do so."
@@ -394,7 +398,7 @@ pya = pyaudio.PyAudio()
 
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, camera_idx=0, mic_idx=None, speaker_idx=None, voice_name="Zephyr", esp32_port=None):
+    def __init__(self, video_mode=DEFAULT_MODE, camera_idx=0, mic_idx=None, speaker_idx=None, voice_name="Zephyr", esp32_port=None, tello_ip="192.168.10.1"):
         self.video_mode = video_mode
         self.camera_idx = camera_idx
         self.mic_idx = mic_idx
@@ -402,7 +406,7 @@ class AudioLoop:
         self.voice_name = voice_name
         self.esp32_port = esp32_port
         self.serial_conn = None
-        self.tello = TelloController()
+        self.tello = TelloController(ip=tello_ip)
         self.leviton = LevitonController()
         self.ewelink = EwelinkController()
 
@@ -817,6 +821,276 @@ def choose_esp32_port():
         except ValueError:
             print("Please enter a valid number or 'N'.")
 
+def choose_tello_ip():
+    while True:
+        ip = input("\nEnter Tello drone IP address [default: 192.168.10.1]: ").strip()
+        if not ip:
+            return "192.168.10.1"
+        import re
+        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip):
+            return ip
+        else:
+            print("Invalid IP address format. Please enter a valid IPv4 address (e.g., 192.168.10.1).")
+
+def show_settings_dialog(pya_instance, default_mode="camera"):
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+        import re
+    except ImportError:
+        print("Tkinter not available. Falling back to command-line prompts.")
+        return "fallback"
+
+    # 1. Microphones
+    mic_devices = []
+    default_mic_idx = None
+    try:
+        default_mic_info = pya_instance.get_default_input_device_info()
+        default_mic_idx = default_mic_info["index"]
+    except Exception:
+        pass
+
+    for i in range(pya_instance.get_device_count()):
+        try:
+            info = pya_instance.get_device_info_by_index(i)
+            if info.get('maxInputChannels') > 0:
+                mic_devices.append((i, info.get('name')))
+        except Exception:
+            pass
+
+    # 2. Speakers
+    speaker_devices = []
+    default_speaker_idx = None
+    try:
+        default_speaker_info = pya_instance.get_default_output_device_info()
+        default_speaker_idx = default_speaker_info["index"]
+    except Exception:
+        pass
+
+    for i in range(pya_instance.get_device_count()):
+        try:
+            info = pya_instance.get_device_info_by_index(i)
+            if info.get('maxOutputChannels') > 0:
+                speaker_devices.append((i, info.get('name')))
+        except Exception:
+            pass
+
+    # 3. Cameras
+    print("Scanning for available cameras for the settings window...")
+    available_cameras = []
+    for i in range(4):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                available_cameras.append(i)
+            cap.release()
+
+    # 4. Voices
+    voices = ["Aoede", "Charon", "Kore", "Puck", "Zephyr"]
+
+    # 5. COM/Serial ports
+    com_ports = []
+    try:
+        import serial.tools.list_ports
+        ports = list(serial.tools.list_ports.comports())
+        for p in ports:
+            com_ports.append(p.device)
+    except Exception:
+        pass
+
+    result = {}
+    started = False
+
+    root = tk.Tk()
+    root.title("Gemini Live Session Settings")
+    root.geometry("480x460")
+    root.resizable(False, False)
+
+    # Use native style theme if available
+    style = ttk.Style()
+    try:
+        style.theme_use('vista' if 'vista' in style.theme_names() else 'clam')
+    except Exception:
+        pass
+
+    main_frame = ttk.Frame(root, padding="20 20 20 20")
+    main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    title_label = ttk.Label(main_frame, text="Configure Live Session Preferences", font=("Helvetica", 14, "bold"))
+    title_label.grid(row=0, column=0, columnspan=2, pady=(0, 15), sticky=tk.W)
+
+    # Microphone Selector
+    ttk.Label(main_frame, text="Microphone:").grid(row=1, column=0, sticky=tk.W, pady=8)
+    mic_options = [f"{name} (Index {idx})" for idx, name in mic_devices]
+    mic_combo = ttk.Combobox(main_frame, values=mic_options, state="readonly", width=42)
+    mic_combo.grid(row=1, column=1, sticky=tk.W, pady=8)
+    
+    default_mic_str = ""
+    for idx, name in mic_devices:
+        if idx == default_mic_idx:
+            default_mic_str = f"{name} (Index {idx})"
+            break
+    if default_mic_str:
+        mic_combo.set(default_mic_str)
+    elif mic_options:
+        mic_combo.current(0)
+
+    # Speaker Selector
+    ttk.Label(main_frame, text="Speaker:").grid(row=2, column=0, sticky=tk.W, pady=8)
+    speaker_options = [f"{name} (Index {idx})" for idx, name in speaker_devices]
+    speaker_combo = ttk.Combobox(main_frame, values=speaker_options, state="readonly", width=42)
+    speaker_combo.grid(row=2, column=1, sticky=tk.W, pady=8)
+    
+    default_speaker_str = ""
+    for idx, name in speaker_devices:
+        if idx == default_speaker_idx:
+            default_speaker_str = f"{name} (Index {idx})"
+            break
+    if default_speaker_str:
+        speaker_combo.set(default_speaker_str)
+    elif speaker_options:
+        speaker_combo.current(0)
+
+    # Video Mode Selector
+    ttk.Label(main_frame, text="Video Mode:").grid(row=3, column=0, sticky=tk.W, pady=8)
+    video_modes = ["Camera", "Screen Share", "None"]
+    mode_combo = ttk.Combobox(main_frame, values=video_modes, state="readonly", width=42)
+    mode_combo.grid(row=3, column=1, sticky=tk.W, pady=8)
+    
+    if default_mode == "camera":
+        mode_combo.set("Camera")
+    elif default_mode == "screen":
+        mode_combo.set("Screen Share")
+    else:
+        mode_combo.set("None")
+
+    # Camera Selector
+    ttk.Label(main_frame, text="Camera Feed:").grid(row=4, column=0, sticky=tk.W, pady=8)
+    camera_options = [f"Camera {idx}" for idx in available_cameras]
+    if not camera_options:
+        camera_options = ["No cameras detected"]
+    camera_combo = ttk.Combobox(main_frame, values=camera_options, state="readonly", width=42)
+    camera_combo.grid(row=4, column=1, sticky=tk.W, pady=8)
+    if available_cameras:
+        camera_combo.current(0)
+    else:
+        camera_combo.current(0)
+        camera_combo.configure(state="disabled")
+
+    # Voice Selector
+    ttk.Label(main_frame, text="Gemini Voice:").grid(row=5, column=0, sticky=tk.W, pady=8)
+    voice_combo = ttk.Combobox(main_frame, values=voices, state="readonly", width=42)
+    voice_combo.grid(row=5, column=1, sticky=tk.W, pady=8)
+    if "Zephyr" in voices:
+        voice_combo.set("Zephyr")
+    else:
+        voice_combo.current(0)
+
+    # ESP32 COM Port Selector
+    ttk.Label(main_frame, text="ESP32 COM Port:").grid(row=6, column=0, sticky=tk.W, pady=8)
+    port_options = ["None (Simulation Mode)"] + com_ports
+    port_combo = ttk.Combobox(main_frame, values=port_options, state="readonly", width=42)
+    port_combo.grid(row=6, column=1, sticky=tk.W, pady=8)
+    port_combo.current(0)
+
+    # Tello Drone IP Entry
+    ttk.Label(main_frame, text="Tello Drone IP:").grid(row=7, column=0, sticky=tk.W, pady=8)
+    tello_ip_entry = ttk.Entry(main_frame, width=44)
+    tello_ip_entry.grid(row=7, column=1, sticky=tk.W, pady=8)
+    tello_ip_entry.insert(0, "192.168.10.1")
+
+    def on_mode_change(event):
+        mode = mode_combo.get()
+        if mode == "Camera" and available_cameras:
+            camera_combo.configure(state="readonly")
+        else:
+            camera_combo.configure(state="disabled")
+
+    mode_combo.bind("<<ComboboxSelected>>", on_mode_change)
+    # Initialize correct camera dropdown state
+    on_mode_change(None)
+
+    # Buttons
+    button_frame = ttk.Frame(main_frame, padding=(0, 25, 0, 0))
+    button_frame.grid(row=8, column=0, columnspan=2, sticky=tk.E)
+
+    def on_start():
+        nonlocal started
+        
+        # Extract selections
+        sel_mic = mic_combo.get()
+        if sel_mic:
+            match = re.search(r"\(Index (\d+)\)", sel_mic)
+            result["mic_idx"] = int(match.group(1)) if match else None
+        else:
+            result["mic_idx"] = None
+
+        sel_speaker = speaker_combo.get()
+        if sel_speaker:
+            match = re.search(r"\(Index (\d+)\)", sel_speaker)
+            result["speaker_idx"] = int(match.group(1)) if match else None
+        else:
+            result["speaker_idx"] = None
+
+        mode_str = mode_combo.get()
+        if mode_str == "Camera":
+            result["video_mode"] = "camera"
+        elif mode_str == "Screen Share":
+            result["video_mode"] = "screen"
+        else:
+            result["video_mode"] = "none"
+
+        sel_cam = camera_combo.get()
+        if sel_cam and "Camera" in sel_cam:
+            try:
+                result["camera_idx"] = int(sel_cam.split()[-1])
+            except ValueError:
+                result["camera_idx"] = 0
+        else:
+            result["camera_idx"] = 0
+
+        result["voice_name"] = voice_combo.get()
+
+        sel_port = port_combo.get()
+        if sel_port == "None (Simulation Mode)":
+            result["esp32_port"] = None
+        else:
+            result["esp32_port"] = sel_port
+
+        tello_ip = tello_ip_entry.get().strip()
+        result["tello_ip"] = tello_ip if tello_ip else "192.168.10.1"
+
+        started = True
+        root.destroy()
+
+    def on_cancel():
+        root.destroy()
+
+    start_btn = ttk.Button(button_frame, text="Start Session", command=on_start)
+    start_btn.grid(row=0, column=0, padx=5)
+
+    cancel_btn = ttk.Button(button_frame, text="Cancel", command=on_cancel)
+    cancel_btn.grid(row=0, column=1, padx=5)
+
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    # Center window
+    root.update_idletasks()
+    width = root.winfo_width()
+    height = root.winfo_height()
+    x = (root.winfo_screenwidth() // 2) - (width // 2)
+    y = (root.winfo_screenheight() // 2) - (height // 2)
+    root.geometry(f'{width}x{height}+{x}+{y}')
+
+    root.mainloop()
+
+    if started:
+        return result
+    return None
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -826,31 +1100,55 @@ if __name__ == "__main__":
         help="pixels to stream from",
         choices=["camera", "screen", "none"],
     )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Force CLI configuration prompts instead of GUI window",
+    )
     args = parser.parse_args()
     
     import sys
-    print("Checking available devices...")
     
-    mic_idx = choose_audio_device(pya, is_input=True)
-    speaker_idx = choose_audio_device(pya, is_input=False)
-    
-    camera_idx = 0
-    if args.mode == "camera":
-        camera_idx = choose_camera()
-        if camera_idx is None:
-            print("No camera found. Exiting.")
-            sys.exit(1)
-
-    voice_name = choose_voice()
-    esp32_port = choose_esp32_port()
+    settings = None
+    if not args.cli:
+        print("Opening settings window...")
+        settings = show_settings_dialog(pya, default_mode=args.mode)
+        if settings is None:
+            print("Session canceled by user.")
+            sys.exit(0)
+            
+    if settings == "fallback" or args.cli:
+        print("Checking available devices via CLI...")
+        mic_idx = choose_audio_device(pya, is_input=True)
+        speaker_idx = choose_audio_device(pya, is_input=False)
+        
+        camera_idx = 0
+        video_mode = args.mode
+        if video_mode == "camera":
+            camera_idx = choose_camera()
+            if camera_idx is None:
+                print("No camera found. Exiting.")
+                sys.exit(1)
+        voice_name = choose_voice()
+        esp32_port = choose_esp32_port()
+        tello_ip = choose_tello_ip()
+    else:
+        mic_idx = settings["mic_idx"]
+        speaker_idx = settings["speaker_idx"]
+        video_mode = settings["video_mode"]
+        camera_idx = settings["camera_idx"]
+        voice_name = settings["voice_name"]
+        esp32_port = settings["esp32_port"]
+        tello_ip = settings.get("tello_ip", "192.168.10.1")
 
     print("\nConnecting to Gemini...")
     main = AudioLoop(
-        video_mode=args.mode,
+        video_mode=video_mode,
         camera_idx=camera_idx,
         mic_idx=mic_idx,
         speaker_idx=speaker_idx,
         voice_name=voice_name,
-        esp32_port=esp32_port
+        esp32_port=esp32_port,
+        tello_ip=tello_ip
     )
     asyncio.run(main.run())
