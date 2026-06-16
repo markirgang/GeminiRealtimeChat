@@ -1,5 +1,7 @@
 # Gemini Real-Time Video and Audio Chat
 
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/markirgang/GeminiRealtimeChat)
+
 A Python project for interacting with the Google Gemini Multimodal Live API using real-time video and audio.
 
 ## Setup
