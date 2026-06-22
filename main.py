@@ -264,6 +264,26 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
                 }
             )
         )
+        function_declarations.append(
+            types.FunctionDeclaration(
+                name="pulse_led",
+                description="Pulses (blinks) the onboard LED of the ESP32 dev module a specified number of times. Use this when the user asks you to pulse, blink, or flash the LED a certain number of times.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "type": "integer",
+                            "description": "The number of times to pulse/blink the LED."
+                        },
+                        "duration_ms": {
+                            "type": "integer",
+                            "description": "Optional duration in milliseconds for the ON and OFF state of each pulse. Defaults to 500ms."
+                        }
+                    },
+                    "required": ["count"]
+                }
+            )
+        )
         
     # Add Tello drone control tool
     function_declarations.append(
@@ -367,7 +387,7 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
         "   - The video stream is sent to you at exactly 1 frame per second (1 FPS). Each frame you receive represents exactly 1 second of real time.\n"
         "   - When estimating time or counting seconds (e.g., if the user asks you to wait 5 seconds, count seconds, or track time), use the number of incoming frames as your clock (e.g. 5 frames = 5 seconds). Do not rush or estimate time based on text-generation speeds; wait for the appropriate amount of time to pass.\n\n"
         "3. HARDWARE CONTROL:\n"
-        "   - ESP32 LED: You MUST use the `set_led_state` tool to control this LED whenever the user asks you to turn the LED on or off, make it blink, or change its state.\n"
+        "   - ESP32 LED: You MUST use the `set_led_state` tool to turn the LED on or off. If the user asks you to pulse, blink, or flash the LED a certain number of times (e.g., to match the count of fingers you see in the frame), you MUST use the `pulse_led` tool with the appropriate count.\n"
         "   - Tello Drone: You MUST use the `send_tello_command` tool to control the Tello drone when the user asks you to perform actions like takeoff, landing, moving, flipping, or rotating.\n"
         "   - Leviton Lights: You MUST use the `set_leviton_light_state` tool when the user asks you to turn smart home lights on, off, or change their brightness level.\n"
         "   - eWeLink Devices: You MUST use the `set_ewelink_device_state` tool when the user asks you to turn eWeLink or Sonoff devices (plugs, switches, fans, etc.) on or off.\n\n"
@@ -395,6 +415,34 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
     )
 
 pya = pyaudio.PyAudio()
+
+
+def count_fingers(hand_landmarks) -> int:
+    """
+    Counts the number of extended fingers using MediaPipe hand landmarks.
+    """
+    landmarks = hand_landmarks.landmark
+    fingers_open = 0
+
+    # Index, Middle, Ring, Pinky
+    tips = [8, 12, 16, 20]
+    pips = [6, 10, 14, 18]
+    for tip, pip in zip(tips, pips):
+        if landmarks[tip].y < landmarks[pip].y:
+            fingers_open += 1
+
+    # Thumb
+    # index mcp (5), pinky mcp (17), thumb tip (4), thumb ip (3)
+    if landmarks[5].x > landmarks[17].x:
+        # Left hand or right hand back
+        if landmarks[4].x > landmarks[3].x:
+            fingers_open += 1
+    else:
+        # Right hand or left hand back
+        if landmarks[4].x < landmarks[3].x:
+            fingers_open += 1
+
+    return fingers_open
 
 
 class AudioLoop:
@@ -439,6 +487,39 @@ class AudioLoop:
             print(f"\n[Simulated ESP32] Sent command to turn LED {status} (No physical ESP32 connected)")
             return {"status": "success", "led_state": status, "simulated": True}
 
+    def pulse_led(self, count: int, duration_ms: int = 500) -> dict:
+        if self.serial_conn and self.serial_conn.is_open:
+            try:
+                import time
+                for i in range(count):
+                    # Turn on
+                    self.serial_conn.write(b'1')
+                    self.serial_conn.flush()
+                    time.sleep(duration_ms / 1000.0)
+                    # Turn off
+                    self.serial_conn.write(b'0')
+                    self.serial_conn.flush()
+                    if i < count - 1:
+                        time.sleep(duration_ms / 1000.0)
+                status = f"Pulsed {count} times"
+                print(f"\n[ESP32] {status}")
+                return {"status": "success", "led_state": "OFF", "pulse_count": count}
+            except Exception as e:
+                print(f"\n[ESP32] Error pulsing LED: {e}")
+                return {"status": "error", "message": str(e)}
+        else:
+            status = f"Pulsed {count} times (simulated)"
+            import time
+            for i in range(count):
+                time.sleep(duration_ms / 1000.0)
+                if i < count - 1:
+                    time.sleep(duration_ms / 1000.0)
+            print(f"\n[Simulated ESP32] {status} (No physical ESP32 connected)")
+            return {"status": "success", "led_state": "OFF", "pulse_count": count, "simulated": True}
+
+    async def pulse_led_async(self, count: int, duration_ms: int = 500) -> dict:
+        return await asyncio.to_thread(self.pulse_led, count, duration_ms)
+
     async def send_tello_command(self, command: str) -> dict:
         return await asyncio.to_thread(self.tello.send_cmd, command)
 
@@ -462,6 +543,20 @@ class AudioLoop:
 
     def _camera_thread_loop(self, loop):
         import time
+        import mediapipe as mp
+        
+        mp_hands = mp.solutions.hands
+        hands = mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        
+        hand_detected_start_time = None
+        hand_lost_start_time = None
+        prompt_sent = False
+        
         cap = cv2.VideoCapture(self.camera_idx)
         last_send_time = 0
         while cap.isOpened():
@@ -476,14 +571,44 @@ class AudioLoop:
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
                 
+            # Convert BGR to RGB color space for MediaPipe (and PIL later)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Run hand detection
+            results = hands.process(frame_rgb)
+            hand_present = results.multi_hand_landmarks is not None
+            
             current_time = time.time()
+            if hand_present:
+                hand_lost_start_time = None
+                if hand_detected_start_time is None:
+                    hand_detected_start_time = current_time
+                
+                # If hand has been detected continuously for 0.5 seconds and prompt hasn't been sent yet
+                if not prompt_sent and (current_time - hand_detected_start_time >= 0.5):
+                    finger_count = count_fingers(results.multi_hand_landmarks[0])
+                    print(f"\n[Camera Thread] Hand detected with {finger_count} fingers! Sending trigger prompt to Gemini.")
+                    trigger_msg = {
+                        "type": "text",
+                        "data": f"System: The user just held up their hand to the camera showing exactly {finger_count} fingers. Look at the current video frame, verify the hand gesture showing {finger_count} fingers, and call the `pulse_led` tool with count={finger_count} immediately without waiting!"
+                    }
+                    if self.out_queue is not None and not self.out_queue.full():
+                        loop.call_soon_threadsafe(self.out_queue.put_nowait, trigger_msg)
+                    prompt_sent = True
+                    last_send_time = 0  # Force an immediate frame send
+            else:
+                hand_detected_start_time = None
+                if hand_lost_start_time is None:
+                    hand_lost_start_time = current_time
+                
+                # If hand has been gone continuously for 1.0 seconds, reset prompt_sent
+                if prompt_sent and (current_time - hand_lost_start_time >= 1.0):
+                    print("\n[Camera Thread] Hand removed for 1.0 seconds. Resetting gesture trigger.")
+                    prompt_sent = False
+                    
             if current_time - last_send_time >= 1.0:
                 last_send_time = current_time
                 
-                # Convert BGR to RGB color space
-                # OpenCV captures in BGR but PIL expects RGB format
-                # This prevents the blue tint in the video feed
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = PIL.Image.fromarray(frame_rgb)
                 img.thumbnail([1024, 1024])
 
@@ -547,6 +672,8 @@ class AudioLoop:
                         await self.session.send_realtime_input(audio=types.Blob(data=msg["data"], mime_type=msg["mime_type"]))
                     elif msg.get("type") == "video":
                         await self.session.send_realtime_input(video=types.Blob(data=msg["data"], mime_type=msg["mime_type"]))
+                    elif msg.get("type") == "text":
+                        await self.session.send(input=msg["data"], end_of_turn=True)
                     else:
                         await self.session.send(input=msg)
 
@@ -616,6 +743,17 @@ class AudioLoop:
                                 device_name = fc.args.get("device_name")
                                 state = fc.args.get("state")
                                 result = await self.set_ewelink_device_state(device_name, state)
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        name=fc.name,
+                                        response=result,
+                                        id=fc.id
+                                    )
+                                )
+                            elif fc.name == "pulse_led":
+                                count = fc.args.get("count")
+                                duration_ms = fc.args.get("duration_ms", 500)
+                                result = await self.pulse_led_async(count, duration_ms)
                                 function_responses.append(
                                     types.FunctionResponse(
                                         name=fc.name,

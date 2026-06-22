@@ -7,3 +7,6 @@ mss
 pyserial
 decora-wifi
 sonoff-python
+mediapipe>=0.10.0,<0.10.30
+attrs
+protobuf>=4.0.0,<5.0.0

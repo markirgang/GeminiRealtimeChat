@@ -47,6 +47,13 @@ let geminiAnalyser = null;
 let userVisualizerId = null;
 let geminiVisualizerId = null;
 
+// MediaPipe Hands State
+let hands = null;
+let handsInterval = null;
+let handDetectedStartTime = null;
+let handLostStartTime = null;
+let promptSent = false;
+
 // DOM Elements
 const apiKeyInput = document.getElementById('api-key');
 const toggleApiKeyBtn = document.getElementById('toggle-api-key');
@@ -70,6 +77,28 @@ const geminiCanvas = document.getElementById('gemini-canvas');
 const savedKey = localStorage.getItem('gemini_live_api_key');
 if (savedKey) {
   apiKeyInput.value = savedKey;
+}
+
+// Set default system instruction
+if (!systemInstruction.value.trim()) {
+  systemInstruction.value = `You are a helpful real-time multimodal voice assistant running on the user's local computer. You have direct access to local hardware and smart devices: an onboard LED of an ESP32 microcontroller, a Tello drone, Leviton smart lights, and eWeLink (Sonoff) devices.
+
+1. VISUAL MODALITY AWARENESS:
+   - You are receiving a continuous, real-time video stream (from the user's webcam or screen share).
+   - Pay close attention to what you see. You MUST proactively notice, react to, and comment on objects, gestures, text, or visual changes shown in the video feed. Do NOT wait for the user to prompt you or say they are showing you something; describe what you see naturally as part of the conversation.
+   - For example, if you see the user holding a coffee cup, showing a phone, or displaying any object, refer to it and ask about it or comment on it immediately.
+
+2. TIME PERCEPTION CALIBRATION:
+   - The video stream is sent to you at exactly 1 frame per second (1 FPS). Each frame you receive represents exactly 1 second of real time.
+   - When estimating time or counting seconds, use the number of incoming frames as your clock.
+
+3. HARDWARE CONTROL:
+   - ESP32 LED: You MUST use the \`set_led_state\` tool to turn the LED on or off. If the user asks you to pulse, blink, or flash the LED a certain number of times (e.g., to match the count of fingers you see in the frame), you MUST use the \`pulse_led\` tool with the appropriate count.
+   - Tello Drone: You MUST use the \`send_tello_command\` tool to control the Tello drone when the user asks you to perform actions like takeoff, landing, moving, flipping, or rotating.
+   - Leviton Lights: You MUST use the \`set_leviton_light_state\` tool when the user asks you to turn smart home lights on, off, or change their brightness level.
+   - eWeLink Devices: You MUST use the \`set_ewelink_device_state\` tool when the user asks you to turn eWeLink or Sonoff devices (plugs, switches, fans, etc.) on or off.
+
+If a physical device is not connected or configured, the application will automatically run the command in simulated/fallback mode, so always call the tools anyway. Never tell the user that you cannot control the hardware, as you are fully equipped with tools to do so.`;
 }
 
 // Toggle API Key visibility
@@ -153,7 +182,99 @@ async function connectSession() {
                 voice_name: voice
               }
             }
-          }
+          },
+          tools: [
+            {
+              function_declarations: [
+                {
+                  name: "set_led_state",
+                  description: "Controls the onboard LED of the ESP32 dev module. State should be True to turn the LED on, or False to turn it off.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      state: {
+                        type: "BOOLEAN",
+                        description: "True to turn on the LED (red), False to turn it off."
+                      }
+                    },
+                    required: ["state"]
+                  }
+                },
+                {
+                  name: "pulse_led",
+                  description: "Pulses (blinks) the onboard LED of the ESP32 dev module a specified number of times. Use this when the user asks you to pulse, blink, or flash the LED a certain number of times.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      count: {
+                        type: "INTEGER",
+                        description: "The number of times to pulse/blink the LED."
+                      },
+                      duration_ms: {
+                        type: "INTEGER",
+                        description: "Optional duration in milliseconds for the ON and OFF state of each pulse. Defaults to 500ms."
+                      }
+                    },
+                    required: ["count"]
+                  }
+                },
+                {
+                  name: "send_tello_command",
+                  description: "Sends a control command to the Tello drone over UDP. Supported commands include takeoff, land, up, down, left, right, forward, back, cw, ccw, flip, emergency.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      command: {
+                        type: "STRING",
+                        description: "The SDK command to send to the drone."
+                      }
+                    },
+                    required: ["command"]
+                  }
+                },
+                {
+                  name: "set_leviton_light_state",
+                  description: "Controls Leviton Decora Smart Wi-Fi switches and dimmers in the user's home. Allows turning lights on/off and optionally setting brightness levels (for dimmers).",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      switch_name: {
+                        type: "STRING",
+                        description: "The name of the light switch to control (e.g. 'Kitchen', 'Living Room')."
+                      },
+                      state: {
+                        type: "BOOLEAN",
+                        description: "True to turn the light on, False to turn it off."
+                      },
+                      brightness: {
+                        type: "INTEGER",
+                        description: "Optional brightness level as a percentage (0 to 100). Only applicable to dimmable switches."
+                      }
+                    },
+                    required: ["switch_name", "state"]
+                  }
+                },
+                {
+                  name: "set_ewelink_device_state",
+                  description: "Controls eWeLink (Sonoff) smart plugs, switches, and other devices in the user's home. Allows turning devices on or off.",
+                  parameters: {
+                    type: "OBJECT",
+                    properties: {
+                      device_name: {
+                        type: "STRING",
+                        description: "The name of the device to control (e.g. 'Fan', 'Desk Light')."
+                      },
+                      state: {
+                        type: "BOOLEAN",
+                        description: "True to turn the device on, False to turn it off."
+                      }
+                    },
+                    required: ["device_name", "state"]
+                  }
+                }
+              ]
+            }
+          ]
         }
       }
     };
@@ -179,6 +300,54 @@ async function connectSession() {
         data = JSON.parse(event.data);
       }
       
+      if (data.toolCall) {
+        const functionCalls = data.toolCall.functionCalls;
+        const functionResponses = [];
+        for (const fc of functionCalls) {
+          let result = {};
+          if (fc.name === "set_led_state") {
+            const state = fc.args.state;
+            result = { status: "success", led_state: state ? "ON" : "OFF", simulated: true };
+            appendSystemMessage(`[Simulated ESP32] Turned LED ${state ? "ON" : "OFF"}`);
+          } else if (fc.name === "pulse_led") {
+            const count = fc.args.count;
+            result = { status: "success", count: count, simulated: true };
+            appendSystemMessage(`[Simulated ESP32] Pulsed LED ${count} times`);
+          } else if (fc.name === "send_tello_command") {
+            const cmd = fc.args.command;
+            result = { status: "success", command: cmd, response: "ok (simulated)", simulated: true };
+            appendSystemMessage(`[Simulated Tello] Executed command: ${cmd}`);
+          } else if (fc.name === "set_leviton_light_state") {
+            const switchName = fc.args.switch_name;
+            const state = fc.args.state;
+            const brightness = fc.args.brightness;
+            const brightStr = brightness !== undefined ? ` at ${brightness}%` : "";
+            result = { status: "success", switch_name: switchName, state: state ? "ON" : "OFF", brightness: brightness, simulated: true };
+            appendSystemMessage(`[Simulated Leviton] Set switch '${switchName}' to ${state ? "ON" : "OFF"}${brightStr}`);
+          } else if (fc.name === "set_ewelink_device_state") {
+            const deviceName = fc.args.device_name;
+            const state = fc.args.state;
+            result = { status: "success", device_name: deviceName, state: state ? "ON" : "OFF", simulated: true };
+            appendSystemMessage(`[Simulated eWeLink] Set device '${deviceName}' to ${state ? "ON" : "OFF"}`);
+          }
+          
+          functionResponses.push({
+            name: fc.name,
+            response: result,
+            id: fc.id
+          });
+        }
+        
+        if (functionResponses.length > 0) {
+          const responseMsg = {
+            toolResponse: {
+              functionResponses: functionResponses
+            }
+          };
+          websocket.send(JSON.stringify(responseMsg));
+        }
+      }
+
       if (data.serverContent) {
         const serverContent = data.serverContent;
         
@@ -551,6 +720,111 @@ screenToggleBtn.addEventListener('click', async () => {
   }
 });
 
+function countFingers(landmarks) {
+  let fingersOpen = 0;
+  
+  // Index, Middle, Ring, Pinky tips and PIP joints
+  const tips = [8, 12, 16, 20];
+  const pips = [6, 10, 14, 18];
+  
+  for (let i = 0; i < 4; i++) {
+    if (landmarks[tips[i]].y < landmarks[pips[i]].y) {
+      fingersOpen++;
+    }
+  }
+  
+  // Thumb
+  const thumbTip = landmarks[4];
+  const thumbIp = landmarks[3];
+  const indexMcp = landmarks[5];
+  const pinkyMcp = landmarks[17];
+  
+  // Determine if thumb is extended based on x coordinates and hand orientation
+  if (indexMcp.x > pinkyMcp.x) {
+    if (thumbTip.x > thumbIp.x) {
+      fingersOpen++;
+    }
+  } else {
+    if (thumbTip.x < thumbIp.x) {
+      fingersOpen++;
+    }
+  }
+  
+  return fingersOpen;
+}
+
+function initHands() {
+  if (hands) return;
+  
+  if (typeof Hands === 'undefined') {
+    console.error("MediaPipe Hands library not loaded yet.");
+    appendSystemMessage("Error: MediaPipe Hands library failed to load. Gesture detection unavailable.");
+    return;
+  }
+  
+  hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+  
+  hands.onResults((results) => {
+    const handPresent = results.multiHandLandmarks && results.multiHandLandmarks.length > 0;
+    const currentTime = Date.now();
+    
+    if (handPresent) {
+      handLostStartTime = null;
+      if (!handDetectedStartTime) {
+        handDetectedStartTime = currentTime;
+      }
+      
+      // If hand has been detected continuously for 1.5 seconds and prompt hasn't been sent yet
+      if (!promptSent && (currentTime - handDetectedStartTime >= 1500)) {
+        const fingerCount = countFingers(results.multiHandLandmarks[0]);
+        console.log(`Hand detected for 1.5 seconds with ${fingerCount} fingers. Automatically asking Gemini to count fingers and pulse LED.`);
+        sendTriggerPrompt(fingerCount);
+        promptSent = true;
+      }
+    } else {
+      handDetectedStartTime = null;
+      if (!handLostStartTime) {
+        handLostStartTime = currentTime;
+      }
+      
+      // If hand has been gone continuously for 2.0 seconds, reset promptSent
+      if (promptSent && (currentTime - handLostStartTime >= 2000)) {
+        console.log("Hand removed for 2.0 seconds. Resetting gesture trigger.");
+        promptSent = false;
+      }
+    }
+  });
+}
+
+function sendTriggerPrompt(fingerCount) {
+  if (websocket && websocket.readyState === WebSocket.OPEN) {
+    const triggerMsg = {
+      clientContent: {
+        turns: [
+          {
+            role: "user",
+            parts: [
+              { text: `I am holding up exactly ${fingerCount} fingers. Please count/verify them and pulse the LED exactly ${fingerCount} times using the pulse_led tool.` }
+            ]
+          }
+        ],
+        turnComplete: true
+      }
+    };
+    websocket.send(JSON.stringify(triggerMsg));
+    appendSystemMessage(`Webcam gesture detected! Automatically asking Gemini to pulse LED ${fingerCount} times.`);
+  }
+}
+
 // Start video source (webcam or screen share)
 async function startVideoStream(mode) {
   stopVideoStream();
@@ -587,6 +861,21 @@ async function startVideoStream(mode) {
     
     // Periodically capture frames to send to Gemini
     videoInterval = setInterval(sendVideoFrame, 1000);
+
+    // Start MediaPipe Hands if camera mode is active
+    if (mode === 'camera') {
+      initHands();
+      handsInterval = setInterval(async () => {
+        if (videoMode === 'camera' && videoStream && hands) {
+          try {
+            await hands.send({ image: localVideo });
+          } catch (err) {
+            console.error("Error running MediaPipe Hands:", err);
+          }
+        }
+      }, 200); // 5 FPS
+    }
+
     appendSystemMessage(`${mode === 'camera' ? 'Webcam' : 'Screen share'} feed started.`);
   } catch (err) {
     videoMode = 'none';
@@ -600,6 +889,15 @@ function stopVideoStream() {
     clearInterval(videoInterval);
     videoInterval = null;
   }
+
+  if (handsInterval) {
+    clearInterval(handsInterval);
+    handsInterval = null;
+  }
+
+  handDetectedStartTime = null;
+  handLostStartTime = null;
+  promptSent = false;
   
   if (videoStream) {
     videoStream.getTracks().forEach(track => track.stop());
