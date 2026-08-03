@@ -26,3 +26,26 @@ A Python project for interacting with the Google Gemini Multimodal Live API usin
    ```bash
    python main.py
    ```
+
+## Project Structure
+
+```
+Birds/
+├── esp32_led/
+│   └── esp32_led.ino           # ESP32 dual-board firmware for GPIO controls
+├── app.js                      # Web application frontend & Web Serial controller
+├── index.html                  # Multimodal Web UI Dashboard
+├── main.py                     # Backend server & Gemini Multimodal Live API session manager
+├── style.css                   # Custom glassmorphic styling system
+├── Birds On_Off Buttons ESP32.xlsx # GPIO pin mapping configuration
+└── run.bat                     # Application launcher
+```
+
+## Git Commit Tree
+
+To view the commit history graph in your terminal, run:
+```bash
+git tree
+# Equivalent command:
+git log --graph --oneline --all --decorate
+```
