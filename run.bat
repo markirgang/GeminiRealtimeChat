@@ -1,4 +1,5 @@
 @echo off
-call .\.venv\Scripts\activate.bat
-python main.py
+cd /d "%~dp0"
+"%~dp0.venv\Scripts\python.exe" main.py
 pause
+

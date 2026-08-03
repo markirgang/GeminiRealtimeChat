@@ -73,11 +73,378 @@ const clearLogBtn = document.getElementById('clear-log');
 const userCanvas = document.getElementById('user-canvas');
 const geminiCanvas = document.getElementById('gemini-canvas');
 
-// Load API Key from localStorage
-const savedKey = localStorage.getItem('gemini_live_api_key');
-if (savedKey) {
-  apiKeyInput.value = savedKey;
+// ESP32 LED Control DOM Elements
+const ledStatusBadge = document.getElementById('led-status-badge');
+const ledStatusText = document.getElementById('led-status-text');
+const virtualLed = document.getElementById('virtual-led');
+const ledPulseStatus = document.getElementById('led-pulse-status');
+const ledOnBtn = document.getElementById('led-on-btn');
+const ledOffBtn = document.getElementById('led-off-btn');
+const pulseBtns = document.querySelectorAll('.pulse-btn');
+const serialConnectBtn = document.getElementById('serial-connect-btn');
+const serialPortSelect = document.getElementById('serial-port-select');
+const configPulseBtn = document.getElementById('config-pulse-btn');
+
+// ESP32 LED Control Modal Screen DOM Elements
+const ledModalOverlay = document.getElementById('led-modal-overlay');
+const closeLedModalBtn = document.getElementById('close-led-modal');
+const dismissLedModalBtn = document.getElementById('dismiss-led-modal');
+const openLedModalBtn = document.getElementById('open-led-modal-btn');
+const headerOpenLedBtn = document.getElementById('header-open-led-btn');
+const modalVirtualLed = document.getElementById('modal-virtual-led');
+const modalLedPulseStatus = document.getElementById('modal-led-pulse-status');
+const modalLedStatusBadge = document.getElementById('modal-led-status-badge');
+const modalLedStatusText = document.getElementById('modal-led-status-text');
+const modalLedOnBtn = document.getElementById('modal-led-on-btn');
+const modalLedOffBtn = document.getElementById('modal-led-off-btn');
+
+function openLedModal() {
+  if (ledModalOverlay) {
+    ledModalOverlay.classList.remove('hidden');
+  }
 }
+
+function closeLedModal() {
+  if (ledModalOverlay) {
+    ledModalOverlay.classList.add('hidden');
+  }
+}
+
+if (closeLedModalBtn) closeLedModalBtn.addEventListener('click', closeLedModal);
+if (dismissLedModalBtn) dismissLedModalBtn.addEventListener('click', closeLedModal);
+if (openLedModalBtn) openLedModalBtn.addEventListener('click', openLedModal);
+if (headerOpenLedBtn) headerOpenLedBtn.addEventListener('click', openLedModal);
+if (modalLedOnBtn) modalLedOnBtn.addEventListener('click', () => setVirtualLedState(true));
+if (modalLedOffBtn) modalLedOffBtn.addEventListener('click', () => setVirtualLedState(false));
+
+// Web Serial Hardware Control
+let webSerialPort = null;
+let serialWriter = null;
+let availableSerialPorts = [];
+
+async function writeSerialCommand(cmdChar) {
+  if (serialWriter) {
+    try {
+      let cmd = String(cmdChar);
+      if (!cmd.endsWith('\n')) {
+        cmd += '\n';
+      }
+      const data = new TextEncoder().encode(cmd);
+      await serialWriter.write(data);
+    } catch (e) {
+      console.error("Web Serial write error:", e);
+    }
+  }
+}
+
+async function refreshSerialPorts() {
+  if (!('serial' in navigator)) return;
+  try {
+    availableSerialPorts = await navigator.serial.getPorts();
+    populatePortDropdown(webSerialPort);
+
+    // Auto-connect if an authorized port is found and not already open
+    if (availableSerialPorts.length > 0 && !webSerialPort) {
+      console.log("[ESP32] Auto-connecting to available serial port...");
+      await requestAndConnectSerialPort(availableSerialPorts[0]);
+    }
+  } catch (e) {
+    console.error("Failed to query serial ports:", e);
+  }
+}
+
+function populatePortDropdown(selectedPortObj = null) {
+  if (!serialPortSelect) return;
+
+  serialPortSelect.innerHTML = '';
+
+  if (availableSerialPorts.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = 'request_new';
+    opt.textContent = '+ Scan & Connect COM Port...';
+    serialPortSelect.appendChild(opt);
+  } else {
+    availableSerialPorts.forEach((port, idx) => {
+      const info = port.getInfo ? port.getInfo() : {};
+      const vid = info.usbVendorId ? `0x${info.usbVendorId.toString(16).padStart(4, '0')}` : null;
+      const pid = info.usbProductId ? `0x${info.usbProductId.toString(16).padStart(4, '0')}` : null;
+
+      let label = `COM Port ${idx + 1}`;
+      if (vid && pid) {
+        label += ` (USB VID:${vid} PID:${pid})`;
+      }
+
+      const opt = document.createElement('option');
+      opt.value = idx.toString();
+      opt.textContent = label;
+      if (selectedPortObj === port) {
+        opt.selected = true;
+      }
+      serialPortSelect.appendChild(opt);
+    });
+
+    const newOpt = document.createElement('option');
+    newOpt.value = 'request_new';
+    newOpt.textContent = '+ Pair / Connect New COM Port...';
+    serialPortSelect.appendChild(newOpt);
+  }
+}
+
+// Initial port list query
+refreshSerialPorts();
+
+// Detect when USB devices are plugged or unplugged
+if ('serial' in navigator) {
+  navigator.serial.addEventListener('connect', () => refreshSerialPorts());
+  navigator.serial.addEventListener('disconnect', () => refreshSerialPorts());
+}
+
+if (serialPortSelect) {
+  serialPortSelect.addEventListener('change', async () => {
+    if (serialPortSelect.value === 'request_new') {
+      await requestAndConnectSerialPort();
+    }
+  });
+}
+
+async function requestAndConnectSerialPort(targetPort = null) {
+  if (!('serial' in navigator)) {
+    appendSystemMessage('Warning: Web Serial API is not supported in this browser. Please use Chrome or Edge for direct USB hardware control.');
+    return;
+  }
+  try {
+    let portToOpen = targetPort;
+    if (!portToOpen) {
+      portToOpen = await navigator.serial.requestPort();
+    }
+
+    if (serialWriter) {
+      try { await serialWriter.releaseLock(); } catch(e) {}
+    }
+    if (webSerialPort && webSerialPort.open) {
+      try { await webSerialPort.close(); } catch(e) {}
+    }
+
+    webSerialPort = portToOpen;
+    await webSerialPort.open({ baudRate: 115200 });
+    const writableStream = webSerialPort.writable;
+    serialWriter = writableStream.getWriter();
+
+    await refreshSerialPorts();
+    populatePortDropdown(webSerialPort);
+
+    if (serialConnectBtn) {
+      serialConnectBtn.classList.add('active');
+      serialConnectBtn.innerHTML = '<i class="fa-solid fa-check"></i> Connected';
+    }
+    appendSystemMessage('[ESP32] Direct USB Web Serial port connected successfully at 115200 baud!');
+  } catch (err) {
+    console.error('Serial connection failed:', err);
+    appendSystemMessage(`[ESP32] Serial connection failed or cancelled: ${err.message}`);
+  }
+}
+
+if (serialConnectBtn) {
+  serialConnectBtn.addEventListener('click', async () => {
+    const val = serialPortSelect ? serialPortSelect.value : 'request_new';
+    if (val === 'request_new' || availableSerialPorts.length === 0) {
+      await requestAndConnectSerialPort();
+    } else {
+      const idx = parseInt(val, 10);
+      if (!isNaN(idx) && availableSerialPorts[idx]) {
+        await requestAndConnectSerialPort(availableSerialPorts[idx]);
+      } else {
+        await requestAndConnectSerialPort();
+      }
+    }
+  });
+}
+
+// ESP32 LED Helper & Animation Functions
+let isPulsing = false;
+
+async function animateLedPulse(count = 1, gpioPin = 2, durationMs = 350) {
+  isPulsing = false; // interrupt any ongoing pulse loop
+  await new Promise(r => setTimeout(r, 60));
+  isPulsing = true;
+
+  const pin = gpioPin || 2;
+  const statusTextStr = `PULSING GPIO ${pin} x${count}`;
+  if (ledStatusBadge) {
+    ledStatusBadge.className = 'led-status-badge pulsing';
+    ledStatusText.textContent = statusTextStr;
+  }
+  if (modalLedStatusBadge) {
+    modalLedStatusBadge.className = 'led-status-badge pulsing';
+    if (modalLedStatusText) modalLedStatusText.textContent = statusTextStr;
+  }
+
+  const startMsg = `Pulsing GPIO ${pin} ${count} time${count > 1 ? 's' : ''}...`;
+  if (ledPulseStatus) ledPulseStatus.textContent = startMsg;
+  if (modalLedPulseStatus) modalLedPulseStatus.textContent = startMsg;
+
+  for (let i = 1; i <= count; i++) {
+    if (!isPulsing) break;
+
+    const activeBtns = document.querySelectorAll(`.pulse-btn[data-count="${i}"]`);
+    activeBtns.forEach(btn => btn.classList.add('active-pulse'));
+
+    if (virtualLed) virtualLed.classList.add('active');
+    if (modalVirtualLed) modalVirtualLed.classList.add('active');
+
+    const pulseMsg = `Pulsing GPIO ${pin} (${i}/${count})...`;
+    if (ledPulseStatus) ledPulseStatus.textContent = pulseMsg;
+    if (modalLedPulseStatus) modalLedPulseStatus.textContent = pulseMsg;
+
+    // Write physical HIGH to ESP32 serial
+    await writeSerialCommand(`${pin}:1\r\n`);
+
+    await new Promise(r => setTimeout(r, durationMs));
+
+    // Write physical LOW to ESP32 serial
+    await writeSerialCommand(`${pin}:0\r\n`);
+
+    if (virtualLed) virtualLed.classList.remove('active');
+    if (modalVirtualLed) modalVirtualLed.classList.remove('active');
+    activeBtns.forEach(btn => btn.classList.remove('active-pulse'));
+
+    if (i < count && isPulsing) {
+      await new Promise(r => setTimeout(r, durationMs));
+    }
+  }
+
+  if (isPulsing) {
+    isPulsing = false;
+    if (ledStatusBadge) {
+      ledStatusBadge.className = 'led-status-badge disconnected';
+      ledStatusText.textContent = 'OFF';
+    }
+    if (modalLedStatusBadge) {
+      modalLedStatusBadge.className = 'led-status-badge disconnected';
+      if (modalLedStatusText) modalLedStatusText.textContent = 'OFF';
+    }
+    const endMsg = `Completed ${count} pulse${count > 1 ? 's' : ''}`;
+    if (ledPulseStatus) ledPulseStatus.textContent = endMsg;
+    if (modalLedPulseStatus) modalLedPulseStatus.textContent = endMsg;
+  }
+}
+
+function setVirtualLedState(on) {
+  isPulsing = false;
+  if (on) {
+    writeSerialCommand('1');
+    if (virtualLed) {
+      virtualLed.classList.add('active-on');
+      virtualLed.classList.remove('active');
+    }
+    if (modalVirtualLed) {
+      modalVirtualLed.classList.add('active-on');
+      modalVirtualLed.classList.remove('active');
+    }
+    if (ledStatusBadge) {
+      ledStatusBadge.className = 'led-status-badge on';
+      ledStatusText.textContent = 'ON';
+    }
+    if (modalLedStatusBadge) {
+      modalLedStatusBadge.className = 'led-status-badge on';
+      if (modalLedStatusText) modalLedStatusText.textContent = 'ON';
+    }
+    if (ledPulseStatus) ledPulseStatus.textContent = 'LED turned ON';
+    if (modalLedPulseStatus) modalLedPulseStatus.textContent = 'LED turned ON';
+  } else {
+    writeSerialCommand('0');
+    if (virtualLed) {
+      virtualLed.classList.remove('active-on', 'active');
+    }
+    if (modalVirtualLed) {
+      modalVirtualLed.classList.remove('active-on', 'active');
+    }
+    if (ledStatusBadge) {
+      ledStatusBadge.className = 'led-status-badge disconnected';
+      ledStatusText.textContent = 'OFF';
+    }
+    if (modalLedStatusBadge) {
+      modalLedStatusBadge.className = 'led-status-badge disconnected';
+      if (modalLedStatusText) modalLedStatusText.textContent = 'OFF';
+    }
+    if (ledPulseStatus) ledPulseStatus.textContent = 'LED turned OFF';
+    if (modalLedPulseStatus) modalLedPulseStatus.textContent = 'LED turned OFF';
+  }
+}
+
+// Bind Pulse 1..10 Buttons and Quick Action Buttons
+if (pulseBtns && pulseBtns.length > 0) {
+  pulseBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const count = parseInt(btn.getAttribute('data-count'), 10);
+      appendSystemMessage(`[ESP32 LED Control] Manual pulse button pressed: Pulsing ${count} time${count > 1 ? 's' : ''}`);
+      
+      // 1. Physically pulse LED (via Web Serial if connected) and animate screen LED
+      animateLedPulse(count);
+
+      // 2. If Gemini Live session is open, notify Gemini AI session to execute pulse_led tool
+      if (websocket && websocket.readyState === WebSocket.OPEN) {
+        const triggerMsg = {
+          clientContent: {
+            turns: [
+              {
+                role: "user",
+                parts: [
+                  { text: `I just pressed button ${count} on screen. Please pulse the LED ${count} times using the pulse_led tool.` }
+                ]
+              }
+            ],
+            turnComplete: true
+          }
+        };
+        websocket.send(JSON.stringify(triggerMsg));
+      }
+    });
+  });
+}
+
+if (ledOnBtn) {
+  ledOnBtn.addEventListener('click', () => {
+    appendSystemMessage('[ESP32 LED Control] Manual button: Turned LED ON');
+    setVirtualLedState(true);
+  });
+}
+
+if (ledOffBtn) {
+  ledOffBtn.addEventListener('click', () => {
+    appendSystemMessage('[ESP32 LED Control] Manual button: Turned LED OFF');
+    setVirtualLedState(false);
+  });
+}
+
+if (configPulseBtn) {
+  configPulseBtn.addEventListener('click', () => {
+    appendSystemMessage('[Configuration Window] Pulse ESP32 LED button pressed: Pulsing 3 times');
+    animateLedPulse(3);
+
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+      const triggerMsg = {
+        clientContent: {
+          turns: [
+            {
+              role: "user",
+              parts: [
+                { text: "I just pressed the 'Pulse ESP32 LED' button in the Configuration window. Please pulse the LED 3 times using the pulse_led tool." }
+              ]
+            }
+          ],
+          turnComplete: true
+        }
+      };
+      websocket.send(JSON.stringify(triggerMsg));
+    }
+  });
+}
+
+// Load API Key from localStorage or default
+const DEFAULT_API_KEY = '';
+const savedKey = localStorage.getItem('gemini_live_api_key');
+apiKeyInput.value = savedKey || DEFAULT_API_KEY;
 
 // Set default system instruction
 if (!systemInstruction.value.trim()) {
@@ -162,6 +529,9 @@ async function connectSession() {
     sessionActive = true;
     updateConnectionStatus('connected');
     
+    // Launch ESP32 LED Control Screen Modal upon session startup
+    openLedModal();
+    
     // Initialize Web Audio (Mic capture and visualizers)
     try {
       await initAudio();
@@ -202,20 +572,24 @@ async function connectSession() {
                 },
                 {
                   name: "pulse_led",
-                  description: "Pulses (blinks) the onboard LED of the ESP32 dev module a specified number of times. Use this when the user asks you to pulse, blink, or flash the LED a certain number of times.",
+                  description: "Pulses (blinks) a specific GPIO pin on the ESP32 module on and off a specified number of times. When finger gestures are shown (1 finger -> GPIO 1, 2 fingers -> GPIO 2, 3 fingers -> GPIO 3, 4 fingers -> GPIO 4), pulse target GPIO pin N on and off 1 time.",
                   parameters: {
                     type: "OBJECT",
                     properties: {
                       count: {
                         type: "INTEGER",
-                        description: "The number of times to pulse/blink the LED."
+                        description: "The number of times to pulse/blink the pin (defaults to 1)."
+                      },
+                      gpio: {
+                        type: "INTEGER",
+                        description: "The target ESP32 GPIO pin number to pulse (e.g. 1 for 1 finger, 2 for 2 fingers, 3 for 3 fingers, 4 for 4 fingers)."
                       },
                       duration_ms: {
                         type: "INTEGER",
                         description: "Optional duration in milliseconds for the ON and OFF state of each pulse. Defaults to 500ms."
                       }
                     },
-                    required: ["count"]
+                    required: ["gpio"]
                   }
                 },
                 {
@@ -307,12 +681,16 @@ async function connectSession() {
           let result = {};
           if (fc.name === "set_led_state") {
             const state = fc.args.state;
+            setVirtualLedState(state);
             result = { status: "success", led_state: state ? "ON" : "OFF", simulated: true };
             appendSystemMessage(`[Simulated ESP32] Turned LED ${state ? "ON" : "OFF"}`);
           } else if (fc.name === "pulse_led") {
-            const count = fc.args.count;
-            result = { status: "success", count: count, simulated: true };
-            appendSystemMessage(`[Simulated ESP32] Pulsed LED ${count} times`);
+            const count = fc.args.count || 1;
+            const gpioPin = fc.args.gpio || fc.args.count || 2;
+            const duration = fc.args.duration_ms || 350;
+            animateLedPulse(count, gpioPin, duration);
+            result = { status: "success", count: count, gpio: gpioPin, simulated: true };
+            appendSystemMessage(`[ESP32] Pulsed GPIO pin ${gpioPin} on and off ${count} time(s)`);
           } else if (fc.name === "send_tello_command") {
             const cmd = fc.args.command;
             result = { status: "success", command: cmd, response: "ok (simulated)", simulated: true };
@@ -806,6 +1184,10 @@ function initHands() {
 }
 
 function sendTriggerPrompt(fingerCount) {
+  const gpioPin = fingerCount || 1;
+  // Direct hardware pulse on target GPIO pin equal to fingerCount
+  animateLedPulse(1, gpioPin);
+
   if (websocket && websocket.readyState === WebSocket.OPEN) {
     const triggerMsg = {
       clientContent: {
@@ -813,7 +1195,7 @@ function sendTriggerPrompt(fingerCount) {
           {
             role: "user",
             parts: [
-              { text: `I am holding up exactly ${fingerCount} fingers. Please count/verify them and pulse the LED exactly ${fingerCount} times using the pulse_led tool.` }
+              { text: `I am holding up exactly ${fingerCount} finger${fingerCount !== 1 ? 's' : ''}. Pulse GPIO pin ${fingerCount} on and off 1 time using the pulse_led tool (gpio=${fingerCount}, count=1).` }
             ]
           }
         ],
@@ -821,7 +1203,7 @@ function sendTriggerPrompt(fingerCount) {
       }
     };
     websocket.send(JSON.stringify(triggerMsg));
-    appendSystemMessage(`Webcam gesture detected! Automatically asking Gemini to pulse LED ${fingerCount} times.`);
+    appendSystemMessage(`Webcam gesture detected! (${fingerCount} finger${fingerCount !== 1 ? 's' : ''}) Pulsed GPIO pin ${fingerCount} on and off 1 time.`);
   }
 }
 

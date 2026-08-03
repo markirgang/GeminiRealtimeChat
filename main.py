@@ -64,22 +64,30 @@ class TelloController:
             # Automatically enable SDK mode if not already done
             if not self.sdk_enabled and command != "command":
                 print("[Tello] Enabling SDK mode...")
+                self.sock.settimeout(3.0)  # Short timeout for initial SDK check
                 self.sock.sendto(b"command", self.drone_address)
                 response, _ = self.sock.recvfrom(1024)
                 print(f"[Tello] SDK response: {response.decode('utf-8').strip()}")
                 self.sdk_enabled = True
 
             print(f"[Tello] Sending command: {command}")
+            # Use a longer timeout for control commands as actions like takeoff, land, or flip take time
+            self.sock.settimeout(15.0)
             self.sock.sendto(command.encode('utf-8'), self.drone_address)
             response, _ = self.sock.recvfrom(1024)
             res_str = response.decode('utf-8').strip()
             print(f"[Tello] Response: {res_str}")
             return {"status": "success", "response": res_str}
         except (socket.timeout, socket.error) as e:
-            # Fall back to simulation if the physical drone isn't reachable
-            print(f"[Tello] Communication failed ({e}). Falling back to simulation for: {command}")
-            self.simulated = True
-            return {"status": "success", "response": "ok (simulated fallback)", "simulated": True}
+            if not self.sdk_enabled:
+                # Fall back to simulation if the physical drone isn't reachable initially
+                print(f"[Tello] Initial connection/SDK activation failed ({e}). Falling back to simulation mode.")
+                self.simulated = True
+                return {"status": "success", "response": "ok (simulated fallback)", "simulated": True}
+            else:
+                # If SDK mode was already enabled, it's a temporary timeout or connection glitch
+                print(f"[Tello] Command '{command}' failed or timed out ({e}). Retaining connection.")
+                return {"status": "error", "message": f"Command execution failed: {e}"}
 
 
 class LevitonController:
@@ -179,6 +187,48 @@ class EwelinkController:
             return True
         try:
             import sonoff
+            import random
+            import time
+            import requests
+
+            # Patch update_devices to work with modern eWeLink API and query parameters
+            def patched_update_devices(self_sonoff):
+                if not self_sonoff._wshost:
+                    return []
+                
+                # Check skipped login / grace period
+                if self_sonoff._skipped_login and self_sonoff.is_grace_period():
+                    return self_sonoff._devices
+
+                nonce = ''.join([str(random.randint(0, 9)) for _ in range(15)])
+                params = {
+                    'appid': 'oeVkj2lYFGnJu5XUtWisfW4utiN4u9Mq',
+                    'ts': int(time.time()),
+                    'nonce': nonce,
+                    'version': '6'
+                }
+
+                try:
+                    url = f'https://{self_sonoff._api_region}-api.coolkit.cc:8080/api/user/device'
+                    r = requests.get(url, headers=self_sonoff._headers, params=params)
+                    resp = r.json()
+                    
+                    if 'error' in resp and resp['error'] != 0:
+                        print(f"[eWeLink] API error response: {resp}")
+                        if resp['error'] in [400, 401]:
+                            return self_sonoff._devices
+
+                    if isinstance(resp, dict) and 'devicelist' in resp:
+                        self_sonoff._devices = resp['devicelist']
+                    else:
+                        self_sonoff._devices = resp
+                except Exception as e:
+                    print(f"[eWeLink] Error updating devices: {e}")
+                
+                return self_sonoff._devices
+
+            sonoff.Sonoff.update_devices = patched_update_devices
+
             self.client = sonoff.Sonoff(self.username, self.password, self.region)
             print("[eWeLink] Successfully authenticated with eWeLink Cloud Services.")
             return True
@@ -267,20 +317,24 @@ def get_config(voice_name="Zephyr", enable_esp32=True):
         function_declarations.append(
             types.FunctionDeclaration(
                 name="pulse_led",
-                description="Pulses (blinks) the onboard LED of the ESP32 dev module a specified number of times. Use this when the user asks you to pulse, blink, or flash the LED a certain number of times.",
+                description="Pulses (blinks) a specific GPIO pin on the ESP32 module on and off a specified number of times. When finger gestures are shown (1 finger -> GPIO 1, 2 fingers -> GPIO 2, 3 fingers -> GPIO 3, 4 fingers -> GPIO 4), pulse target GPIO pin N on and off 1 time.",
                 parameters={
                     "type": "object",
                     "properties": {
                         "count": {
                             "type": "integer",
-                            "description": "The number of times to pulse/blink the LED."
+                            "description": "The number of times to pulse/blink the pin (defaults to 1)."
+                        },
+                        "gpio": {
+                            "type": "integer",
+                            "description": "The target ESP32 GPIO pin number to pulse (e.g. 1 for 1 finger, 2 for 2 fingers, 3 for 3 fingers, 4 for 4 fingers)."
                         },
                         "duration_ms": {
                             "type": "integer",
                             "description": "Optional duration in milliseconds for the ON and OFF state of each pulse. Defaults to 500ms."
                         }
                     },
-                    "required": ["count"]
+                    "required": ["gpio"]
                 }
             )
         )
@@ -442,19 +496,442 @@ def count_fingers(hand_landmarks) -> int:
         if landmarks[4].x < landmarks[3].x:
             fingers_open += 1
 
-    return fingers_open
+def load_esp32_button_config():
+    """
+    Loads button functions and GPIO mappings for ESP32 Left and ESP32 Right.
+    Tries to read 'Birds On_Off Buttons ESP32.xlsx' if present; otherwise uses fallback data.
+    """
+    fallback_config = {
+        "left": [
+            {"name": "L Parrot Mouth", "gpio": 0},
+            {"name": "L Parrot Eyes", "gpio": 1},
+            {"name": "L Parrot Body", "gpio": 2},
+            {"name": "L Parrot Light", "gpio": 3},
+            {"name": "L Parrot Mouth Select", "gpio": 4},
+            {"name": "L Rear Bird Rear Move", "gpio": 5},
+            {"name": "L Rear Bird Rear Light", "gpio": 12},
+            {"name": "L Front Bird Move", "gpio": 13},
+            {"name": "L Front Bird Light", "gpio": 14},
+            {"name": "L Bird Front Chirp", "gpio": 15},
+            {"name": "Center Bird Move", "gpio": 16},
+        ],
+        "right": [
+            {"name": "R Parrot Mouth", "gpio": 0},
+            {"name": "R Parrot Eyes", "gpio": 1},
+            {"name": "R Parrot Body", "gpio": 2},
+            {"name": "R Parrot Light", "gpio": 3},
+            {"name": "R Parrot Mouth Select", "gpio": 4},
+            {"name": "R Rear Bird Rear Move", "gpio": 5},
+            {"name": "R Rear Bird Rear Light", "gpio": 12},
+            {"name": "R Front Bird Move", "gpio": 13},
+            {"name": "R Front Bird Light", "gpio": 14},
+            {"name": "R Bird Front Chirp", "gpio": 15},
+            {"name": "Center Bird Move", "gpio": 16},
+        ],
+    }
+
+    excel_path = "Birds On_Off Buttons ESP32.xlsx"
+    if not os.path.exists(excel_path):
+        return fallback_config
+
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        z = zipfile.ZipFile(excel_path)
+        shared_strings = []
+        if 'xl/sharedStrings.xml' in z.namelist():
+            tree = ET.fromstring(z.read('xl/sharedStrings.xml'))
+            for elem in tree.iter():
+                if elem.tag.endswith('t') and elem.text:
+                    shared_strings.append(elem.text)
+
+        sf = 'xl/worksheets/sheet1.xml'
+        if sf not in z.namelist():
+            return fallback_config
+
+        tree = ET.fromstring(z.read(sf))
+        ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+        left_items = []
+        right_items = []
+        current_section = None
+
+        for row in tree.findall('.//s:row', ns):
+            cells = {}
+            for cell in row.findall('s:c', ns):
+                r = cell.attrib.get('r')
+                t = cell.attrib.get('t')
+                v_elem = cell.find('s:v', ns)
+                val = ""
+                if v_elem is not None and v_elem.text:
+                    if t == 's':
+                        idx = int(v_elem.text)
+                        val = shared_strings[idx] if idx < len(shared_strings) else ""
+                    else:
+                        val = v_elem.text
+                col = ''.join([c for c in r if c.isalpha()])
+                cells[col] = val.strip()
+
+            val_a = cells.get('A', '')
+            val_b = cells.get('B', '')
+
+            if 'ESP32 Left' in val_a:
+                current_section = 'left'
+                continue
+            elif 'ESP32 Right' in val_a:
+                current_section = 'right'
+                continue
+
+            if val_a and val_b and val_a not in ('Outputs', 'Bottango Driver ESP 32s'):
+                try:
+                    gpio_val = int(float(val_b))
+                    item = {"name": val_a, "gpio": gpio_val}
+                    if current_section == 'left':
+                        left_items.append(item)
+                    elif current_section == 'right':
+                        right_items.append(item)
+                except ValueError:
+                    pass
+
+        if left_items or right_items:
+            return {"left": left_items or fallback_config["left"], "right": right_items or fallback_config["right"]}
+    except Exception as e:
+        print(f"[Spreadsheet] Notice: Using default button configuration ({e})")
+
+    return fallback_config
+
+
+def scan_and_autodetect_esp32_ports():
+    """
+    Scans system serial ports for connected ESP32 or USB-to-UART bridge devices.
+    Returns:
+      display_options: list of human-readable labels for Comboboxes
+      device_map: dict mapping label -> raw device name (e.g. 'COM3')
+      detected_left_label: label for auto-detected Left ESP32
+      detected_right_label: label for auto-detected Right ESP32
+    """
+    esp32_keywords = [
+        "cp210", "ch340", "ch341", "ft232", "esp32", "usb-serial", "usb serial",
+        "silicon labs", "uart", "serial port", "prolific"
+    ]
+
+    display_options = ["None (Simulation Mode)"]
+    device_map = {"None (Simulation Mode)": None}
+    esp32_candidate_labels = []
+
+    try:
+        import serial.tools.list_ports
+        ports = list(serial.tools.list_ports.comports())
+        for p in ports:
+            dev = p.device
+            desc = p.description or ""
+            label = f"{dev} ({desc})" if desc and desc != dev else dev
+            display_options.append(label)
+            device_map[label] = dev
+
+            combined = f"{dev} {desc}".lower()
+            if any(k in combined for k in esp32_keywords):
+                esp32_candidate_labels.append(label)
+            else:
+                esp32_candidate_labels.append(label)
+    except Exception as e:
+        print(f"[COM Scan Error] {e}")
+
+    detected_left_label = esp32_candidate_labels[0] if len(esp32_candidate_labels) > 0 else "None (Simulation Mode)"
+    detected_right_label = esp32_candidate_labels[1] if len(esp32_candidate_labels) > 1 else "None (Simulation Mode)"
+
+    return display_options, device_map, detected_left_label, detected_right_label
+
+
+class ESP32PulseWindow:
+    def __init__(self, audio_loop_instance):
+        self.audio_loop = audio_loop_instance
+        self.root = None
+        self.status_label = None
+        self.config = load_esp32_button_config()
+        self.left_combo = None
+        self.right_combo = None
+        self.button_states = {}
+        self.buttons = {}
+        self.port_device_map = {}
+
+    def start_gui(self):
+        import threading
+        thread = threading.Thread(target=self._run, daemon=True)
+        thread.start()
+
+    def _run(self):
+        import tkinter as tk
+        from tkinter import ttk
+        import threading
+
+        self.root = tk.Tk()
+        self.root.title("Thinker Window - Birds Dual ESP32 Controller")
+        self.root.geometry("880x660")
+        self.root.configure(bg="#0f172a")
+
+        # Styling
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TFrame", background="#0f172a")
+        style.configure("TLabelframe", background="#0f172a", foreground="#38bdf8", bordercolor="#334155")
+        style.configure("TLabelframe.Label", background="#0f172a", foreground="#38bdf8", font=("Segoe UI", 11, "bold"))
+        style.configure("TLabel", background="#0f172a", foreground="#f8fafc", font=("Segoe UI", 10))
+        style.configure("Header.TLabel", font=("Segoe UI", 14, "bold"), foreground="#38bdf8")
+        style.configure("SubHeader.TLabel", font=("Segoe UI", 9), foreground="#94a3b8")
+
+        # Header Frame
+        header_frame = ttk.Frame(self.root, padding=12)
+        header_frame.pack(fill="x")
+
+        title_lbl = ttk.Label(header_frame, text="🦜 Thinker Window - Birds Dual ESP32 Controller", style="Header.TLabel")
+        title_lbl.pack(anchor="w")
+
+        # COM Ports Selection Bar
+        ports_frame = ttk.Frame(header_frame, padding=(0, 8, 0, 0))
+        ports_frame.pack(fill="x")
+
+        # Left COM selector
+        ttk.Label(ports_frame, text="ESP32 Left:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        self.left_combo = ttk.Combobox(ports_frame, state="readonly", width=22)
+        self.left_combo.grid(row=0, column=1, sticky="w", padx=(0, 10))
+
+        # Right COM selector
+        ttk.Label(ports_frame, text="ESP32 Right:").grid(row=0, column=2, sticky="w", padx=(0, 5))
+        self.right_combo = ttk.Combobox(ports_frame, state="readonly", width=22)
+        self.right_combo.grid(row=0, column=3, sticky="w", padx=(0, 10))
+
+        def refresh_com_ports(auto_connect=False):
+            options, dev_map, auto_l, auto_r = scan_and_autodetect_esp32_ports()
+            self.port_device_map = dev_map
+
+            self.left_combo['values'] = options
+            self.right_combo['values'] = options
+
+            curr_l_dev = self.audio_loop.esp32_left_port
+            curr_r_dev = self.audio_loop.esp32_right_port
+
+            match_l = [lbl for lbl, dev in dev_map.items() if dev == curr_l_dev] if curr_l_dev else []
+            if match_l:
+                self.left_combo.set(match_l[0])
+            elif auto_l in options:
+                self.left_combo.set(auto_l)
+            else:
+                self.left_combo.set("None (Simulation Mode)")
+
+            match_r = [lbl for lbl, dev in dev_map.items() if dev == curr_r_dev] if curr_r_dev else []
+            if match_r:
+                self.right_combo.set(match_r[0])
+            elif auto_r in options:
+                self.right_combo.set(auto_r)
+            else:
+                self.right_combo.set("None (Simulation Mode)")
+
+            if auto_connect:
+                on_update_ports()
+            else:
+                self.update_status(f"COM Ports scanned. Found {len(options)-1} serial port(s).")
+
+        def on_update_ports():
+            sel_l_lbl = self.left_combo.get()
+            sel_r_lbl = self.right_combo.get()
+            dev_l = self.port_device_map.get(sel_l_lbl, sel_l_lbl)
+            dev_r = self.port_device_map.get(sel_r_lbl, sel_r_lbl)
+            _, msg_l = self.audio_loop.connect_esp32("left", dev_l)
+            _, msg_r = self.audio_loop.connect_esp32("right", dev_r)
+            self.update_status(f"{msg_l} | {msg_r}")
+
+        connect_btn = tk.Button(
+            ports_frame,
+            text="Connect Ports",
+            font=("Segoe UI", 9, "bold"),
+            bg="#0284c7",
+            fg="#ffffff",
+            activebackground="#0369a1",
+            activeforeground="#ffffff",
+            relief="flat",
+            cursor="hand2",
+            padx=8,
+            command=on_update_ports
+        )
+        connect_btn.grid(row=0, column=4, padx=3)
+
+        scan_btn = tk.Button(
+            ports_frame,
+            text="🔄 Rescan Ports",
+            font=("Segoe UI", 9, "bold"),
+            bg="#334155",
+            fg="#f8fafc",
+            activebackground="#475569",
+            activeforeground="#ffffff",
+            relief="flat",
+            cursor="hand2",
+            padx=8,
+            command=lambda: refresh_com_ports(auto_connect=True)
+        )
+        scan_btn.grid(row=0, column=5, padx=3)
+
+        # Status readout
+        self.status_label = ttk.Label(header_frame, text="Status: Ready for commands", font=("Segoe UI", 10, "italic"), foreground="#a855f7")
+        self.status_label.pack(anchor="w", pady=(6, 0))
+
+        # Perform initial scan & auto-connect
+        refresh_com_ports(auto_connect=True)
+        self.status_label.pack(anchor="w", pady=(6, 0))
+
+        # Divider
+        ttk.Separator(self.root, orient="horizontal").pack(fill="x", padx=15, pady=2)
+
+        # Main Container split into Left & Right columns
+        main_container = ttk.Frame(self.root, padding=10)
+        main_container.pack(fill="both", expand=True)
+
+        main_container.columnconfigure(0, weight=1)
+        main_container.columnconfigure(1, weight=1)
+
+        # --- LEFT SIDE PANEL ---
+        left_box = ttk.LabelFrame(main_container, text=" 👈 ESP32 Left Board (11 Functions) ", padding=10)
+        left_box.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        left_box.columnconfigure((0, 1), weight=1)
+
+        self.buttons = {}
+        self.button_states = {}
+
+        for idx, item in enumerate(self.config.get("left", [])):
+            r = idx // 2
+            c = idx % 2
+            board = "left"
+            gpio = item['gpio']
+            name = item['name']
+            self.button_states[(board, gpio)] = False
+            btn_text = f"{name}\n(GPIO {gpio}) [OFF]"
+            btn = tk.Button(
+                left_box,
+                text=btn_text,
+                font=("Segoe UI", 9, "bold"),
+                bg="#1e293b",
+                fg="#38bdf8",
+                activebackground="#0284c7",
+                activeforeground="#ffffff",
+                relief="flat",
+                bd=1,
+                cursor="hand2",
+                height=2,
+                command=lambda b=board, g=gpio, n=name: self.on_button_clicked(b, g, n)
+            )
+            btn.grid(row=r, column=c, padx=3, pady=3, sticky="nsew")
+            self.buttons[(board, gpio)] = btn
+
+        # --- RIGHT SIDE PANEL ---
+        right_box = ttk.LabelFrame(main_container, text=" 👉 ESP32 Right Board (11 Functions) ", padding=10)
+        right_box.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        right_box.columnconfigure((0, 1), weight=1)
+
+        for idx, item in enumerate(self.config.get("right", [])):
+            r = idx // 2
+            c = idx % 2
+            board = "right"
+            gpio = item['gpio']
+            name = item['name']
+            self.button_states[(board, gpio)] = False
+            btn_text = f"{name}\n(GPIO {gpio}) [OFF]"
+            btn = tk.Button(
+                right_box,
+                text=btn_text,
+                font=("Segoe UI", 9, "bold"),
+                bg="#1e293b",
+                fg="#a855f7",
+                activebackground="#7e22ce",
+                activeforeground="#ffffff",
+                relief="flat",
+                bd=1,
+                cursor="hand2",
+                height=2,
+                command=lambda b=board, g=gpio, n=name: self.on_button_clicked(b, g, n)
+            )
+            btn.grid(row=r, column=c, padx=3, pady=3, sticky="nsew")
+            self.buttons[(board, gpio)] = btn
+
+        # Center window on screen
+        self.root.update_idletasks()
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.root.winfo_screenheight() // 2) - (h // 2)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+        self.root.mainloop()
+
+    def update_status(self, text):
+        if self.status_label and self.root:
+            try:
+                self.root.after(0, lambda: self.status_label.config(text=f"Status: {text}"))
+            except Exception:
+                pass
+
+    def on_button_clicked(self, board, gpio, name):
+        import threading
+        current_state = self.button_states.get((board, gpio), False)
+        new_state = not current_state
+        self.button_states[(board, gpio)] = new_state
+
+        state_label = "ON" if new_state else "OFF"
+        btn = self.buttons.get((board, gpio))
+
+        if btn:
+            if new_state:
+                btn.config(
+                    text=f"{name}\n(GPIO {gpio}) [ON]",
+                    bg="#16a34a",
+                    fg="#ffffff",
+                    activebackground="#15803d",
+                    activeforeground="#ffffff"
+                )
+            else:
+                default_fg = "#38bdf8" if board == "left" else "#a855f7"
+                default_active_bg = "#0284c7" if board == "left" else "#7e22ce"
+                btn.config(
+                    text=f"{name}\n(GPIO {gpio}) [OFF]",
+                    bg="#1e293b",
+                    fg=default_fg,
+                    activebackground=default_active_bg,
+                    activeforeground="#ffffff"
+                )
+
+        self.update_status(f"Turning {board.title()}: '{name}' (GPIO {gpio}) -> {state_label}...")
+
+        def _execute():
+            res = self.audio_loop.trigger_esp32_gpio(board, gpio, name, state=new_state)
+            status_str = res.get("message", f"Triggered {name} -> {state_label}")
+            self.update_status(status_str)
+
+        threading.Thread(target=_execute, daemon=True).start()
+
+    def on_pulse_clicked(self, count):
+        pass
+
+    def on_turn_on(self):
+        pass
+
+    def on_turn_off(self):
+        pass
 
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, camera_idx=0, mic_idx=None, speaker_idx=None, voice_name="Zephyr", esp32_port=None, tello_ip="192.168.10.1"):
+    def __init__(self, video_mode=DEFAULT_MODE, camera_idx=0, mic_idx=None, speaker_idx=None, voice_name="Zephyr", esp32_port=None, esp32_left_port=None, esp32_right_port=None, tello_ip="192.168.10.1", tello_port=8889):
         self.video_mode = video_mode
         self.camera_idx = camera_idx
         self.mic_idx = mic_idx
         self.speaker_idx = speaker_idx
         self.voice_name = voice_name
-        self.esp32_port = esp32_port
+        self.esp32_left_port = esp32_left_port or esp32_port
+        self.esp32_right_port = esp32_right_port
+        self.esp32_port = self.esp32_left_port
+        self.serial_left = None
+        self.serial_right = None
         self.serial_conn = None
-        self.tello = TelloController(ip=tello_ip)
+        self.tello = TelloController(ip=tello_ip, port=tello_port)
         self.leviton = LevitonController()
         self.ewelink = EwelinkController()
 
@@ -470,55 +947,109 @@ class AudioLoop:
         self.audio_stream = None
         self.playing_audio = False
 
+    def connect_esp32(self, board: str, port_name: str):
+        import serial
+        board = board.lower()
+        if port_name in (None, "None (Simulation Mode)", "None"):
+            if board == "left":
+                if self.serial_left and self.serial_left.is_open:
+                    try:
+                        self.serial_left.close()
+                    except Exception:
+                        pass
+                self.serial_left = None
+                self.esp32_left_port = None
+                self.esp32_port = None
+                self.serial_conn = None
+            else:
+                if self.serial_right and self.serial_right.is_open:
+                    try:
+                        self.serial_right.close()
+                    except Exception:
+                        pass
+                self.serial_right = None
+                self.esp32_right_port = None
+            return True, f"ESP32 {board.title()} set to Simulation Mode"
+
+        try:
+            conn = serial.Serial()
+            conn.port = port_name
+            conn.baudrate = 115200
+            conn.timeout = 1
+            conn.dtr = False
+            conn.rts = False
+            conn.open()
+
+            if board == "left":
+                if self.serial_left and self.serial_left.is_open:
+                    try:
+                        self.serial_left.close()
+                    except Exception:
+                        pass
+                self.serial_left = conn
+                self.esp32_left_port = port_name
+                self.esp32_port = port_name
+                self.serial_conn = conn
+            else:
+                if self.serial_right and self.serial_right.is_open:
+                    try:
+                        self.serial_right.close()
+                    except Exception:
+                        pass
+                self.serial_right = conn
+                self.esp32_right_port = port_name
+                if not self.serial_conn or not self.serial_conn.is_open:
+                    self.serial_conn = conn
+            return True, f"Connected ESP32 {board.title()} on {port_name}"
+        except Exception as e:
+            return False, f"Failed ESP32 {board.title()} ({port_name}): {e}"
+
+    def trigger_esp32_gpio(self, board: str, gpio: int, function_name: str, state: bool = None) -> dict:
+        board = board.lower()
+        conn = self.serial_left if board == "left" else self.serial_right
+        if not conn or not conn.is_open:
+            conn = self.serial_conn
+
+        if state is True or state == 1 or state == "1":
+            cmd_str = f"{gpio}:1\r\n"
+        elif state is False or state == 0 or state == "0":
+            cmd_str = f"{gpio}:0\r\n"
+        elif state == "PULSE" or state == "pulse":
+            cmd_str = f"{gpio}:PULSE\r\n"
+        else:
+            cmd_str = f"{gpio}\r\n"
+
+        if conn and conn.is_open:
+            try:
+                cmd = cmd_str.encode("utf-8")
+                conn.write(cmd)
+                conn.flush()
+                state_desc = "PULSE" if (state == "PULSE" or state == "pulse") else ("ON" if (state is True or state == 1 or state == "1") else ("OFF" if (state is False or state == 0 or state == "0") else "TOGGLE"))
+                msg = f"Sent trigger to ESP32 {board.title()}: '{function_name}' ({state_desc} GPIO {gpio})"
+                print(f"\n[ESP32-{board.upper()}] {msg}")
+                return {"status": "success", "board": board, "gpio": gpio, "message": msg, "state": state}
+            except Exception as e:
+                err_msg = f"Error writing to ESP32 {board.title()} (GPIO {gpio}): {e}"
+                print(f"\n[ESP32-{board.upper()}] {err_msg}")
+                return {"status": "error", "message": err_msg}
+        else:
+            state_desc = "PULSE" if (state == "PULSE" or state == "pulse") else ("ON" if (state is True or state == 1 or state == "1") else ("OFF" if (state is False or state == 0 or state == "0") else "TOGGLE"))
+            sim_msg = f"[Simulated ESP32 {board.title()}] Triggered '{function_name}' ({state_desc}) on GPIO {gpio}"
+            print(f"\n{sim_msg}")
+            return {"status": "success", "board": board, "gpio": gpio, "simulated": True, "message": sim_msg, "state": state}
+
     def set_led_state(self, state: bool) -> dict:
-        if self.serial_conn and self.serial_conn.is_open:
-            try:
-                cmd = b'1' if state else b'0'
-                self.serial_conn.write(cmd)
-                self.serial_conn.flush()
-                status = "ON" if state else "OFF"
-                print(f"\n[ESP32] Sent command to turn LED {status}")
-                return {"status": "success", "led_state": status}
-            except Exception as e:
-                print(f"\n[ESP32] Error writing to serial: {e}")
-                return {"status": "error", "message": str(e)}
-        else:
-            status = "ON" if state else "OFF"
-            print(f"\n[Simulated ESP32] Sent command to turn LED {status} (No physical ESP32 connected)")
-            return {"status": "success", "led_state": status, "simulated": True}
+        return self.trigger_esp32_gpio("left", 2, "Builtin LED ON" if state else "Builtin LED OFF")
 
-    def pulse_led(self, count: int, duration_ms: int = 500) -> dict:
-        if self.serial_conn and self.serial_conn.is_open:
-            try:
-                import time
-                for i in range(count):
-                    # Turn on
-                    self.serial_conn.write(b'1')
-                    self.serial_conn.flush()
-                    time.sleep(duration_ms / 1000.0)
-                    # Turn off
-                    self.serial_conn.write(b'0')
-                    self.serial_conn.flush()
-                    if i < count - 1:
-                        time.sleep(duration_ms / 1000.0)
-                status = f"Pulsed {count} times"
-                print(f"\n[ESP32] {status}")
-                return {"status": "success", "led_state": "OFF", "pulse_count": count}
-            except Exception as e:
-                print(f"\n[ESP32] Error pulsing LED: {e}")
-                return {"status": "error", "message": str(e)}
-        else:
-            status = f"Pulsed {count} times (simulated)"
-            import time
-            for i in range(count):
-                time.sleep(duration_ms / 1000.0)
-                if i < count - 1:
-                    time.sleep(duration_ms / 1000.0)
-            print(f"\n[Simulated ESP32] {status} (No physical ESP32 connected)")
-            return {"status": "success", "led_state": "OFF", "pulse_count": count, "simulated": True}
+    def pulse_led(self, count: int = 1, gpio: int = None, duration_ms: int = 500) -> dict:
+        import time
+        target_gpio = gpio if gpio is not None else 2
+        for _ in range(count):
+            self.trigger_esp32_gpio("left", target_gpio, f"Pulse GPIO {target_gpio}", state="PULSE")
+        return {"status": "success", "pulse_count": count, "gpio": target_gpio}
 
-    async def pulse_led_async(self, count: int, duration_ms: int = 500) -> dict:
-        return await asyncio.to_thread(self.pulse_led, count, duration_ms)
+    async def pulse_led_async(self, count: int = 1, gpio: int = None, duration_ms: int = 500) -> dict:
+        return await asyncio.to_thread(self.pulse_led, count, gpio, duration_ms)
 
     async def send_tello_command(self, command: str) -> dict:
         return await asyncio.to_thread(self.tello.send_cmd, command)
@@ -587,10 +1118,14 @@ class AudioLoop:
                 # If hand has been detected continuously for 0.5 seconds and prompt hasn't been sent yet
                 if not prompt_sent and (current_time - hand_detected_start_time >= 0.5):
                     finger_count = count_fingers(results.multi_hand_landmarks[0])
-                    print(f"\n[Camera Thread] Hand detected with {finger_count} fingers! Sending trigger prompt to Gemini.")
+                    print(f"\n[Camera Thread] Hand detected with {finger_count} fingers! Pulsing GPIO {finger_count} on and off 1 time.")
+                    
+                    # Direct hardware pulse on target GPIO pin equal to finger_count
+                    self.pulse_led(count=1, gpio=finger_count)
+
                     trigger_msg = {
                         "type": "text",
-                        "data": f"System: The user just held up their hand to the camera showing exactly {finger_count} fingers. Look at the current video frame, verify the hand gesture showing {finger_count} fingers, and call the `pulse_led` tool with count={finger_count} immediately without waiting!"
+                        "data": f"System: The user just held up their hand to the camera showing exactly {finger_count} finger{'s' if finger_count != 1 else ''}. GPIO pin {finger_count} was pulsed on and off 1 time. Please confirm to the user that {finger_count} finger{'s' if finger_count != 1 else ''} was detected and GPIO pin {finger_count} was pulsed on and off 1 time."
                     }
                     if self.out_queue is not None and not self.out_queue.full():
                         loop.call_soon_threadsafe(self.out_queue.put_nowait, trigger_msg)
@@ -751,9 +1286,10 @@ class AudioLoop:
                                     )
                                 )
                             elif fc.name == "pulse_led":
-                                count = fc.args.get("count")
+                                count = fc.args.get("count", 1)
+                                gpio = fc.args.get("gpio", 2)
                                 duration_ms = fc.args.get("duration_ms", 500)
-                                result = await self.pulse_led_async(count, duration_ms)
+                                result = await self.pulse_led_async(count=count, gpio=gpio, duration_ms=duration_ms)
                                 function_responses.append(
                                     types.FunctionResponse(
                                         name=fc.name,
@@ -797,16 +1333,22 @@ class AudioLoop:
                     self.playing_audio = False
 
     async def run(self):
-        if self.esp32_port:
-            try:
-                import serial
-                self.serial_conn = serial.Serial(self.esp32_port, 115200, timeout=1)
-                print(f"Connected to ESP32 on port {self.esp32_port}")
-            except Exception as e:
-                print(f"Failed to connect to ESP32 on port {self.esp32_port}: {e}")
-                self.serial_conn = None
-        else:
-            print("No ESP32 port specified. LED control will run in simulation mode.")
+        if self.esp32_left_port:
+            self.connect_esp32("left", self.esp32_left_port)
+        if self.esp32_right_port:
+            self.connect_esp32("right", self.esp32_right_port)
+
+        if not self.esp32_left_port and not self.esp32_right_port:
+            print("No ESP32 ports specified. Running in simulation mode.")
+
+        # Launch Thinker GUI window
+        try:
+            gui_window = ESP32PulseWindow(self)
+            gui_window.start_gui()
+            print("[GUI] Thinker Window launched.")
+        except Exception as gui_err:
+            print(f"[GUI] Could not launch Thinker window: {gui_err}")
+
         try:
             enable_esp32 = True
             async with (
@@ -959,14 +1501,151 @@ def choose_esp32_port():
         except ValueError:
             print("Please enter a valid number or 'N'.")
 
-def choose_tello_ip():
+def choose_tello_port():
     while True:
-        ip = input("\nEnter Tello drone IP address [default: 192.168.10.1]: ").strip()
-        if not ip:
-            return "192.168.10.1"
-        import re
-        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip):
-            return ip
+        port_input = input("Enter Tello drone port [default: 8889]: ").strip()
+        if not port_input:
+            return 8889
+        try:
+            port = int(port_input)
+            if 1 <= port <= 65535:
+                return port
+            else:
+                print("Invalid port number. Must be between 1 and 65535.")
+        except ValueError:
+            print("Please enter a valid integer port number.")
+
+def choose_tello_ip(port=8889):
+    print("\nScanning local network for active devices...")
+    import socket
+    import subprocess
+    import re
+    import concurrent.futures
+    import time
+
+    # Find local subnets
+    local_ips = []
+    try:
+        hostname = socket.gethostname()
+        local_ips = socket.gethostbyname_ex(hostname)[2]
+    except Exception:
+        pass
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        primary_ip = s.getsockname()[0]
+        s.close()
+        if primary_ip not in local_ips:
+            local_ips.append(primary_ip)
+    except Exception:
+        pass
+
+    subnets = set()
+    for ip in local_ips:
+        if ip.startswith("127."):
+            continue
+        parts = ip.split(".")
+        if len(parts) == 4:
+            subnets.add(f"{parts[0]}.{parts[1]}.{parts[2]}.")
+
+    # Common subnets to search
+    subnets.add("192.168.10.")
+    subnets.add("192.168.1.")
+    subnets.add("192.168.0.")
+
+    target_ips = []
+    for subnet in subnets:
+        for i in range(1, 255):
+            target_ips.append(f"{subnet}{i}")
+
+    def ping_udp(ip):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(0.1)
+            sock.sendto(b'', (ip, 9))
+            sock.close()
+        except Exception:
+            pass
+
+    # Rapid UDP ping to populate OS ARP cache
+    with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
+        executor.map(ping_udp, target_ips)
+
+    time.sleep(0.4)
+
+    discovered = []
+    tello_drones = []
+    try:
+        output = subprocess.check_output(["arp", "-a"]).decode('utf-8', errors='ignore')
+        ip_mac_pattern = re.compile(
+            r"^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9a-fA-F:-]{17})\s+(\w+)",
+            re.MULTILINE
+        )
+
+        def check_if_tello(ip):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(0.3)
+                sock.sendto(b'command', (ip, port))
+                data, _ = sock.recvfrom(1024)
+                if b'ok' in data.lower():
+                    return ip
+            except Exception:
+                pass
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            return None
+
+        candidate_ips = []
+        for match in ip_mac_pattern.finditer(output):
+            ip, mac, link_type = match.groups()
+            if ip.startswith("224.") or ip.startswith("239.") or ip.endswith(".255") or ip == "255.255.255.255":
+                continue
+
+            in_subnet = False
+            for subnet in subnets:
+                if ip.startswith(subnet):
+                    in_subnet = True
+                    break
+            if in_subnet:
+                candidate_ips.append((ip, mac))
+
+        tello_detected = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as checker:
+            check_results = checker.map(check_if_tello, [ip for ip, _ in candidate_ips])
+            for res in check_results:
+                if res:
+                    tello_detected.append(res)
+
+        for ip, mac in candidate_ips:
+            if ip in tello_detected:
+                discovered.append(f"{ip} ({mac}) [Tello Drone]")
+                tello_drones.append(ip)
+            else:
+                discovered.append(f"{ip} ({mac})")
+    except Exception as e:
+        print(f"Error scanning network: {e}")
+
+    if discovered:
+        print("\nActive devices found on the local network:")
+        for idx, dev in enumerate(discovered, 1):
+            print(f"  {idx}. {dev}")
+    else:
+        print("\nNo active devices found on the local network.")
+
+    while True:
+        default_ip = tello_drones[0] if tello_drones else "192.168.10.1"
+        ip_input = input(f"\nEnter Tello drone IP address [default: {default_ip}]: ").strip()
+        if not ip_input:
+            return default_ip
+        # In case the user typed/selected something with a MAC address suffix
+        match = re.match(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", ip_input)
+        if match:
+            return match.group(1)
         else:
             print("Invalid IP address format. Please enter a valid IPv4 address (e.g., 192.168.10.1).")
 
@@ -1042,7 +1721,7 @@ def show_settings_dialog(pya_instance, default_mode="camera"):
 
     root = tk.Tk()
     root.title("Gemini Live Session Settings")
-    root.geometry("480x460")
+    root.geometry("480x500")
     root.resizable(False, False)
 
     # Use native style theme if available
@@ -1127,18 +1806,188 @@ def show_settings_dialog(pya_instance, default_mode="camera"):
     else:
         voice_combo.current(0)
 
-    # ESP32 COM Port Selector
-    ttk.Label(main_frame, text="ESP32 COM Port:").grid(row=6, column=0, sticky=tk.W, pady=8)
-    port_options = ["None (Simulation Mode)"] + com_ports
-    port_combo = ttk.Combobox(main_frame, values=port_options, state="readonly", width=42)
-    port_combo.grid(row=6, column=1, sticky=tk.W, pady=8)
-    port_combo.current(0)
+    # 5. COM/Serial ports (Auto-Detected)
+    port_options, port_device_map, auto_left_lbl, auto_right_lbl = scan_and_autodetect_esp32_ports()
+
+    # ESP32 Left COM Port Selector
+    ttk.Label(main_frame, text="ESP32 Left COM Port:").grid(row=6, column=0, sticky=tk.W, pady=6)
+    left_port_combo = ttk.Combobox(main_frame, values=port_options, state="readonly", width=42)
+    left_port_combo.grid(row=6, column=1, sticky=tk.W, pady=6)
+    left_port_combo.set(auto_left_lbl)
+
+    # ESP32 Right COM Port Selector
+    ttk.Label(main_frame, text="ESP32 Right COM Port:").grid(row=7, column=0, sticky=tk.W, pady=6)
+    right_port_combo = ttk.Combobox(main_frame, values=port_options, state="readonly", width=42)
+    right_port_combo.grid(row=7, column=1, sticky=tk.W, pady=6)
+    right_port_combo.set(auto_right_lbl)
 
     # Tello Drone IP Entry
-    ttk.Label(main_frame, text="Tello Drone IP:").grid(row=7, column=0, sticky=tk.W, pady=8)
-    tello_ip_entry = ttk.Entry(main_frame, width=44)
-    tello_ip_entry.grid(row=7, column=1, sticky=tk.W, pady=8)
-    tello_ip_entry.insert(0, "192.168.10.1")
+    ttk.Label(main_frame, text="Tello Drone IP:").grid(row=8, column=0, sticky=tk.W, pady=8)
+    
+    tello_ip_frame = ttk.Frame(main_frame)
+    tello_ip_frame.grid(row=8, column=1, sticky=tk.W, pady=8)
+    
+    tello_ip_combo = ttk.Combobox(tello_ip_frame, width=28, state="normal")
+    tello_ip_combo.pack(side=tk.LEFT, padx=(0, 5))
+    tello_ip_combo.set("192.168.10.1")
+    
+    # Tello Drone Port Entry
+    ttk.Label(main_frame, text="Tello Drone Port:").grid(row=9, column=0, sticky=tk.W, pady=8)
+    tello_port_entry = ttk.Entry(main_frame, width=45)
+    tello_port_entry.grid(row=9, column=1, sticky=tk.W, pady=8)
+    tello_port_entry.insert(0, "8889")
+    
+    def on_scan_network():
+        scan_btn.configure(state="disabled", text="Scanning...")
+        
+        tello_port_str = tello_port_entry.get().strip()
+        try:
+            scan_port = int(tello_port_str)
+            if not (1 <= scan_port <= 65535):
+                scan_port = 8889
+        except ValueError:
+            scan_port = 8889
+        
+        def run_scan():
+            import socket
+            import subprocess
+            import re
+            import concurrent.futures
+            import time
+            
+            # Find local subnets
+            local_ips = []
+            try:
+                hostname = socket.gethostname()
+                local_ips = socket.gethostbyname_ex(hostname)[2]
+            except Exception:
+                pass
+            
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                primary_ip = s.getsockname()[0]
+                s.close()
+                if primary_ip not in local_ips:
+                    local_ips.append(primary_ip)
+            except Exception:
+                pass
+                
+            subnets = set()
+            for ip in local_ips:
+                if ip.startswith("127."):
+                    continue
+                parts = ip.split(".")
+                if len(parts) == 4:
+                    subnets.add(f"{parts[0]}.{parts[1]}.{parts[2]}.")
+            
+            # Common subnets to search
+            subnets.add("192.168.10.")
+            subnets.add("192.168.1.")
+            subnets.add("192.168.0.")
+            
+            target_ips = []
+            for subnet in subnets:
+                for i in range(1, 255):
+                    target_ips.append(f"{subnet}{i}")
+                    
+            def ping_udp(ip):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.settimeout(0.1)
+                    sock.sendto(b'', (ip, 9))
+                    sock.close()
+                except Exception:
+                    pass
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
+                executor.map(ping_udp, target_ips)
+                
+            time.sleep(0.4)
+            
+            discovered = []
+            tello_drones = []
+            try:
+                output = subprocess.check_output(["arp", "-a"]).decode('utf-8', errors='ignore')
+                ip_mac_pattern = re.compile(
+                    r"^\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9a-fA-F:-]{17})\s+(\w+)",
+                    re.MULTILINE
+                )
+                
+                def check_if_tello(ip):
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        sock.settimeout(0.3)
+                        sock.sendto(b'command', (ip, scan_port))
+                        data, _ = sock.recvfrom(1024)
+                        if b'ok' in data.lower():
+                            return ip
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            sock.close()
+                        except Exception:
+                            pass
+                    return None
+
+                candidate_ips = []
+                for match in ip_mac_pattern.finditer(output):
+                    ip, mac, link_type = match.groups()
+                    if ip.startswith("224.") or ip.startswith("239.") or ip.endswith(".255") or ip == "255.255.255.255":
+                        continue
+                    
+                    in_subnet = False
+                    for subnet in subnets:
+                        if ip.startswith(subnet):
+                            in_subnet = True
+                            break
+                    if in_subnet:
+                        candidate_ips.append((ip, mac))
+
+                tello_detected = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as checker:
+                    check_results = checker.map(check_if_tello, [ip for ip, _ in candidate_ips])
+                    for res in check_results:
+                        if res:
+                            tello_detected.append(res)
+                
+                for ip, mac in candidate_ips:
+                    if ip in tello_detected:
+                        discovered.append(f"{ip} ({mac}) [Tello Drone]")
+                        tello_drones.append(ip)
+                    else:
+                        discovered.append(f"{ip} ({mac})")
+            except Exception as e:
+                print(f"[Network Scan] Error: {e}")
+                
+            root.after(0, lambda: scan_complete(discovered, tello_drones))
+            
+        def scan_complete(discovered, tello_drones):
+            scan_btn.configure(state="normal", text="Scan Network")
+            if discovered:
+                print(f"\n[Network Scan] Found {len(discovered)} devices on local network:")
+                for d in discovered:
+                    print(f"  - {d}")
+                tello_ip_combo.configure(values=discovered)
+                
+                if tello_drones:
+                    # Select the first Tello drone automatically
+                    matching_opt = [d for d in discovered if tello_drones[0] in d]
+                    if matching_opt:
+                        tello_ip_combo.set(matching_opt[0])
+                        from tkinter import messagebox
+                        messagebox.showinfo("Drone IP Found", f"Successfully found Tello drone at {tello_drones[0]}!")
+            else:
+                from tkinter import messagebox
+                messagebox.showwarning("Scan Complete", "No active devices detected on the local network.")
+                
+        import threading
+        threading.Thread(target=run_scan, daemon=True).start()
+
+    scan_btn = ttk.Button(tello_ip_frame, text="Scan Network", command=on_scan_network)
+    scan_btn.pack(side=tk.LEFT)
+
 
     def on_mode_change(event):
         mode = mode_combo.get()
@@ -1153,7 +2002,7 @@ def show_settings_dialog(pya_instance, default_mode="camera"):
 
     # Buttons
     button_frame = ttk.Frame(main_frame, padding=(0, 25, 0, 0))
-    button_frame.grid(row=8, column=0, columnspan=2, sticky=tk.E)
+    button_frame.grid(row=9, column=0, columnspan=2, sticky=tk.E)
 
     def on_start():
         nonlocal started
@@ -1192,14 +2041,28 @@ def show_settings_dialog(pya_instance, default_mode="camera"):
 
         result["voice_name"] = voice_combo.get()
 
-        sel_port = port_combo.get()
-        if sel_port == "None (Simulation Mode)":
-            result["esp32_port"] = None
-        else:
-            result["esp32_port"] = sel_port
+        sel_l_lbl = left_port_combo.get()
+        result["esp32_left_port"] = port_device_map.get(sel_l_lbl)
 
-        tello_ip = tello_ip_entry.get().strip()
-        result["tello_ip"] = tello_ip if tello_ip else "192.168.10.1"
+        sel_r_lbl = right_port_combo.get()
+        result["esp32_right_port"] = port_device_map.get(sel_r_lbl)
+        result["esp32_port"] = result["esp32_left_port"]
+
+        tello_ip = tello_ip_combo.get().strip()
+        match = re.match(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", tello_ip)
+        tello_ip = match.group(1) if match else "192.168.10.1"
+        result["tello_ip"] = tello_ip
+
+        tello_port_str = tello_port_entry.get().strip()
+        try:
+            tello_port = int(tello_port_str)
+            if not (1 <= tello_port <= 65535):
+                raise ValueError()
+        except ValueError:
+            from tkinter import messagebox
+            messagebox.showerror("Invalid Port", "Tello Port must be an integer between 1 and 65535.")
+            return
+        result["tello_port"] = tello_port
 
         started = True
         root.destroy()
@@ -1222,6 +2085,9 @@ def show_settings_dialog(pya_instance, default_mode="camera"):
     x = (root.winfo_screenwidth() // 2) - (width // 2)
     y = (root.winfo_screenheight() // 2) - (height // 2)
     root.geometry(f'{width}x{height}+{x}+{y}')
+
+    # Automatically start network scan at startup
+    root.after(100, on_scan_network)
 
     root.mainloop()
 
@@ -1268,16 +2134,20 @@ if __name__ == "__main__":
                 print("No camera found. Exiting.")
                 sys.exit(1)
         voice_name = choose_voice()
-        esp32_port = choose_esp32_port()
-        tello_ip = choose_tello_ip()
+        esp32_left_port = choose_esp32_port()
+        esp32_right_port = choose_esp32_port()
+        tello_port = choose_tello_port()
+        tello_ip = choose_tello_ip(tello_port)
     else:
         mic_idx = settings["mic_idx"]
         speaker_idx = settings["speaker_idx"]
         video_mode = settings["video_mode"]
         camera_idx = settings["camera_idx"]
         voice_name = settings["voice_name"]
-        esp32_port = settings["esp32_port"]
+        esp32_left_port = settings.get("esp32_left_port")
+        esp32_right_port = settings.get("esp32_right_port")
         tello_ip = settings.get("tello_ip", "192.168.10.1")
+        tello_port = settings.get("tello_port", 8889)
 
     print("\nConnecting to Gemini...")
     main = AudioLoop(
@@ -1286,7 +2156,9 @@ if __name__ == "__main__":
         mic_idx=mic_idx,
         speaker_idx=speaker_idx,
         voice_name=voice_name,
-        esp32_port=esp32_port,
-        tello_ip=tello_ip
+        esp32_left_port=esp32_left_port,
+        esp32_right_port=esp32_right_port,
+        tello_ip=tello_ip,
+        tello_port=tello_port
     )
     asyncio.run(main.run())

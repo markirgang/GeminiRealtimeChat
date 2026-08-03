@@ -25,15 +25,124 @@
         <i class="fa-solid fa-wand-magic-sparkles brand-icon"></i>
         <h1>Gemini <span class="accent-text">Live</span></h1>
       </div>
-      <div class="status-badge disconnected" id="connection-status">
-        <span class="status-dot"></span>
-        <span id="status-text">Disconnected</span>
+      <div style="display: flex; align-items: center; gap: 0.75rem; margin-left: auto;">
+        <button type="button" id="header-open-led-btn" class="text-btn action-header-pulse" title="Launch Fullscreen ESP32 LED Pulse Screen">
+          <i class="fa-solid fa-lightbulb" style="color: #38bdf8;"></i> Launch ESP32 LED Screen (1-10 Buttons)
+        </button>
+        <div class="status-badge disconnected" id="connection-status">
+          <span class="status-dot"></span>
+          <span id="status-text">Disconnected</span>
+        </div>
       </div>
     </header>
 
     <main class="app-grid">
       <!-- Left Column: Config & Controls -->
       <section class="left-column">
+        <!-- ESP32 LED Control Card (Top Priority) -->
+        <div class="card glass-card" id="led-card">
+          <div class="card-header">
+            <div class="header-left" style="display: flex; align-items: center; gap: 0.5rem;">
+              <i class="fa-solid fa-lightbulb"></i>
+              <h2>ESP32 LED Control</h2>
+            </div>
+            <div class="led-status-badge disconnected" id="led-status-badge">
+              <span class="status-dot" id="led-dot"></span>
+              <span id="led-status-text">OFF</span>
+            </div>
+          </div>
+          <div class="card-body led-body">
+            <!-- COM Port Select Dropdown Bar -->
+            <div class="com-port-bar">
+              <label for="serial-port-select" class="com-port-label">
+                <i class="fa-solid fa-microchip"></i> ESP32 COM Port
+              </label>
+              <div class="com-port-controls">
+                <select id="serial-port-select" class="select-com-port">
+                  <option value="">Select COM Port...</option>
+                  <option value="request_new">+ Add/Scan COM Port...</option>
+                </select>
+                <button type="button" id="serial-connect-btn" class="text-btn btn-small action-connect-port" title="Connect Selected ESP32 COM Port">
+                  <i class="fa-solid fa-plug"></i> Connect
+                </button>
+              </div>
+            </div>
+
+            <!-- Virtual LED Visualizer Widget -->
+            <div class="virtual-led-container">
+              <div class="virtual-led-display">
+                <div class="virtual-led-bulb" id="virtual-led">
+                  <i class="fa-solid fa-bolt led-icon"></i>
+                </div>
+                <div class="led-pulse-ring" id="pulse-ring"></div>
+              </div>
+              <div class="led-info">
+                <span class="led-title">ESP32 Onboard LED (GPIO 2)</span>
+                <span class="led-sub" id="led-pulse-status">Ready for pulse command</span>
+              </div>
+            </div>
+
+            <!-- Pulse Buttons Grid 1 to 10 -->
+            <div class="pulse-section">
+              <label class="pulse-grid-label">
+                <i class="fa-solid fa-hand-pointer"></i> Select Pulse Count (1 - 10 Times)
+              </label>
+              <div class="pulse-buttons-grid">
+                <button type="button" class="pulse-btn" data-count="1" title="Pulse 1 time">
+                  <span class="btn-num">1</span>
+                  <span class="btn-lbl">Pulse</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="2" title="Pulse 2 times">
+                  <span class="btn-num">2</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="3" title="Pulse 3 times">
+                  <span class="btn-num">3</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="4" title="Pulse 4 times">
+                  <span class="btn-num">4</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="5" title="Pulse 5 times">
+                  <span class="btn-num">5</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="6" title="Pulse 6 times">
+                  <span class="btn-num">6</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="7" title="Pulse 7 times">
+                  <span class="btn-num">7</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="8" title="Pulse 8 times">
+                  <span class="btn-num">8</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="9" title="Pulse 9 times">
+                  <span class="btn-num">9</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+                <button type="button" class="pulse-btn" data-count="10" title="Pulse 10 times">
+                  <span class="btn-num">10</span>
+                  <span class="btn-lbl">Pulses</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Quick Direct Controls -->
+            <div class="led-quick-actions">
+              <button type="button" id="led-on-btn" class="text-btn btn-small action-on">
+                <i class="fa-solid fa-power-off"></i> Turn ON
+              </button>
+              <button type="button" id="led-off-btn" class="text-btn btn-small action-off">
+                <i class="fa-solid fa-circle-xmark"></i> Turn OFF
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- Configuration Card -->
         <div class="card glass-card" id="config-card">
           <div class="card-header">
@@ -45,7 +154,7 @@
             <div class="input-group">
               <label for="api-key">Gemini API Key</label>
               <div class="password-input-wrapper">
-                <input type="password" id="api-key" placeholder="Enter your Gemini API Key..." autocomplete="off">
+                <input type="password" id="api-key" placeholder="Enter your Gemini API Key..." value="" autocomplete="off">
                 <button type="button" id="toggle-api-key" class="icon-btn" title="Show/Hide API Key">
                   <i class="fa-solid fa-eye"></i>
                 </button>
@@ -77,6 +186,13 @@
             <div class="input-group">
               <label for="system-instruction">System Instruction</label>
               <textarea id="system-instruction" placeholder="e.g. You are a helpful assistant. Keep your responses concise and friendly."></textarea>
+            </div>
+
+            <!-- Configuration Pulse LED Button -->
+            <div class="input-group" style="margin-top: 0.75rem;">
+              <button type="button" id="config-pulse-btn" class="text-btn action-config-pulse" title="Pulse the ESP32 LED directly from configuration window">
+                <i class="fa-solid fa-bolt"></i> Pulse ESP32 LED
+              </button>
             </div>
           </div>
         </div>
@@ -182,8 +298,121 @@
         <button id="screen-toggle" class="dock-btn icon-only" title="Toggle Screen Share" disabled>
           <i class="fa-solid fa-desktop"></i>
         </button>
+
+        <div class="divider"></div>
+
+        <!-- Open LED Control Screen Modal -->
+        <button id="open-led-modal-btn" class="dock-btn icon-only" title="Open ESP32 LED Control Screen">
+          <i class="fa-solid fa-lightbulb"></i>
+        </button>
       </div>
     </footer>
+  </div>
+
+  <!-- ESP32 LED Control Startup Modal Screen -->
+  <div class="modal-overlay hidden" id="led-modal-overlay">
+    <div class="modal-container glass-card" id="led-modal-window">
+      <!-- Modal Header -->
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <i class="fa-solid fa-lightbulb modal-title-icon"></i>
+          <div>
+            <h2>ESP32 LED Control Screen</h2>
+            <span class="modal-subtitle">Session active — Press buttons to pulse onboard LED 1 to 10 times</span>
+          </div>
+        </div>
+        <button type="button" class="modal-close-btn" id="close-led-modal" title="Close screen">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="modal-body">
+        <!-- Visual Virtual LED & Status -->
+        <div class="virtual-led-container">
+          <div class="virtual-led-display">
+            <div class="virtual-led-bulb" id="modal-virtual-led">
+              <i class="fa-solid fa-bolt led-icon"></i>
+            </div>
+            <div class="led-pulse-ring" id="modal-pulse-ring"></div>
+          </div>
+          <div class="led-info">
+            <span class="led-title">ESP32 Onboard LED (GPIO 2)</span>
+            <span class="led-sub" id="modal-led-pulse-status">Ready for pulse command</span>
+          </div>
+          <div class="led-status-badge disconnected" id="modal-led-status-badge" style="margin-left: auto;">
+            <span class="status-dot" id="modal-led-dot"></span>
+            <span id="modal-led-status-text">OFF</span>
+          </div>
+        </div>
+
+        <!-- 10 Pulse Buttons Grid (1 to 10) -->
+        <div class="pulse-section">
+          <label class="pulse-grid-label">
+            <i class="fa-solid fa-hand-pointer"></i> Select Pulse Count (1 - 10 Times)
+          </label>
+          <div class="pulse-buttons-grid modal-pulse-grid">
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="1" title="Pulse 1 time">
+              <span class="btn-num">1</span>
+              <span class="btn-lbl">Pulse</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="2" title="Pulse 2 times">
+              <span class="btn-num">2</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="3" title="Pulse 3 times">
+              <span class="btn-num">3</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="4" title="Pulse 4 times">
+              <span class="btn-num">4</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="5" title="Pulse 5 times">
+              <span class="btn-num">5</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="6" title="Pulse 6 times">
+              <span class="btn-num">6</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="7" title="Pulse 7 times">
+              <span class="btn-num">7</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="8" title="Pulse 8 times">
+              <span class="btn-num">8</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="9" title="Pulse 9 times">
+              <span class="btn-num">9</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+            <button type="button" class="pulse-btn modal-pulse-btn" data-count="10" title="Pulse 10 times">
+              <span class="btn-num">10</span>
+              <span class="btn-lbl">Pulses</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Quick Direct Actions -->
+        <div class="led-quick-actions" style="margin-top: 0.5rem;">
+          <button type="button" id="modal-led-on-btn" class="text-btn btn-small action-on">
+            <i class="fa-solid fa-power-off"></i> Turn ON
+          </button>
+          <button type="button" id="modal-led-off-btn" class="text-btn btn-small action-off">
+            <i class="fa-solid fa-circle-xmark"></i> Turn OFF
+          </button>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="modal-footer">
+        <button type="button" id="dismiss-led-modal" class="text-btn btn-small" style="padding: 0.5rem 1.25rem;">
+          Return to App
+        </button>
+      </div>
+    </div>
   </div>
 
   <!-- Main JavaScript App -->
